@@ -14,6 +14,8 @@ wz/ 导出的 img XML
         CLI（query / stats）  +  HTTP 服务（内置单页检索）
 ```
 
+图标另走一路，**不落库**：`imgdata/`（由 [wzimgget](https://github.com/sqx6781268/wzimgget) 从客户端 `Data` 的独立 `.img` 提取）→ `serve` 启动时按 8 位零填充 ID 建内存索引 → `/img/<id>.png`。
+
 当前本机基线：`zh-CN` 域 56,264 条物品、45,592 个已扫文件、解析失败 0，图标 28,307 个可用 ID。
 
 > **仓库内容范围**：本仓库只开源**代码与文档**。`wz/`、`imgdata/`、`scripts*/` 等目录是冒险岛客户端的导出内容与素材，版权归 Nexon 及其权利人所有，**不随本仓库分发**，也不在 `.gitignore` 的收录范围内。使用者需自行准备导出数据，详见第 3 节。
@@ -65,7 +67,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/maplewzmeta ./cmd/maplewzm
 ## 3. 准备数据
 
 1. **WZ 导出目录**：默认 `wz/`，结构为 `<包>.wz/<类别>/<id>.img.xml`，例如 `wz/Item.wz/Etc/0430.img.xml`、`wz/String.wz/Eqp.img.xml`。
-2. **图标（可选）**：默认 `imgdata/`，结构为 `imgdata/<Wz>/<类别>/<id>.img.png`。没有图标就把 `icons.enabled` 设为 `false`，接口不返回 `icon` 字段、页面也不渲染图标列，**不影响任何数据**。
+2. **图标（可选）**：默认 `imgdata/`，结构为 `imgdata/<Wz>/<类别>/<id>.img.png`。图标由同作者的 [wzimgget](https://github.com/sqx6781268/wzimgget) 从客户端 `Data` 目录的独立 `.img` 提取产出，两仓库只以该目录交接文件，联动步骤与缺口对账见 [docs/10-图标提取与wzimgget联动.md](docs/10-图标提取与wzimgget联动.md)。没有图标就把 `icons.enabled` 设为 `false`，接口不返回 `icon` 字段、页面也不渲染图标列，**不影响任何数据**。
 3. **配置**：根目录 `wzconfig.json`，支持整行 `//` 注释；相对路径一律按**配置文件所在目录**解析，与启动目录无关。
 
 ```jsonc
@@ -175,7 +177,8 @@ wz/  imgdata/  data/  scripts*/  数据集、图标、客户端脚本、数据�
 
 - 架构与并发模型 → 01；数据集布局 → 02；XML 结构与坑 → 03；
 - 物品 ID 归一与关联 → 04；装备槽 `islot` 与号段 → 05；存储与检索构造 → 06；
-- 配置字段 → 07；CLI/HTTP/页面 → 08；**测试基线、实测数字与已知缺陷** → 09。
+- 配置字段 → 07；CLI/HTTP/页面 → 08；**测试基线、实测数字与已知缺陷** → 09；
+  **图标提取联动（wzimgget）** → 10（交接格式、一次跑通步骤、图标缺口对账）。
 - 附录：**WZ 导出 XML 分类清单**（可复现的计数底稿）、
   **实体与 String.wz 的关联**（20 张文本表各自属于哪个实体域、ID 位数形态、实测关联率与跨实体引用链）。
 
