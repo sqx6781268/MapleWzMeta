@@ -1,0 +1,36 @@
+# 构建产物
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 本地数据库与日志（由 scan / serve 生成）
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+/tmp/
+
+# 游戏数据：需自行从客户端导出，属第三方版权内容，不入库
+/wz/
+/wz-*/
+/imgdata/
+/scripts/
+/scripts-*/
+*.img.xml
+*.img.png
+
+# Go
+vendor/
+coverage.out
+*.test
+
+# 编辑器与系统
+/.idea/
+/.vscode/
+*.swp
+.DS_Store
+Thumbs.db
