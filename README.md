@@ -50,6 +50,10 @@ go build ./... && go vet ./... && go test ./... -count=1
 go install github.com/sqx6781268/MapleWzMeta/cmd/maplewzmeta@latest
 ```
 
+不想装 Go 的用户可直接下载 [Releases](https://github.com/sqx6781268/MapleWzMeta/releases) 里的预编译包，覆盖 `windows-amd64`、`linux-amd64`、`linux-arm64`、`darwin-amd64`、`darwin-arm64` 五个平台。包内含可执行文件、`wzconfig.json`、`LICENSE` 与本 README；解压后仍需按第 3 节自备 `wz/` 导出数据。校验文件为 `SHA256SUMS.txt`。
+
+> macOS 二进制未做签名与公证，首次运行需在「系统设置 → 隐私与安全性」里手动允许，或 `xattr -d com.apple.quarantine maplewzmeta`。
+
 交叉编译（Windows 机器编 Linux 包）：
 
 ```bash
