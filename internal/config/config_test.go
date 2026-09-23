@@ -135,3 +135,22 @@ func TestPicked(t *testing.T) {
 		t.Errorf("未配置语言应报错: %v", err)
 	}
 }
+
+// icons.dir 允许指到打包好的 zip（读图链路与目录一致，见 internal/icons）。
+func TestValidateAcceptsZipIconsDir(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "wz"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := write(t, base, "cfg.json", `{"icons":{"enabled":true,"dir":"imgdata.zip"},"locales":[{"lang":"zh-CN","wz":"wz"}]}`)
+	if err := os.WriteFile(filepath.Join(base, "imgdata.zip"), []byte("PK"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("zip 作为图标来源应通过校验: %v", err)
+	}
+	if filepath.Base(cfg.Icons.Dir) != "imgdata.zip" {
+		t.Errorf("icons.dir 错: %s", cfg.Icons.Dir)
+	}
+}

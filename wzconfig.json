@@ -7,19 +7,29 @@
 
   // 图标为可选项：enabled=false 时不建索引、不注册 /img 路由、页面也不显示图标列。
   // 实测导出布局：<dir>/<Wz>/<类别>/<id>.img.png，Npc 等无类别层同样能索引到。
+  // dir 也可以直接指到打包好的 imgdata.zip（同一棵树打成 zip，Store 模式最快）：
+  // 启动只解析中央目录建索引，取图按偏移量零拷贝，几万张小图不必落盘。
   "icons": {
     "enabled": true,
-    "dir": "imgdata"
+    "dir": "imgdata.zip"
+  },
+
+  // 管理页 /admin 与写接口 /api/admin/*：比对 XML 与库内记录、指定文件重载覆盖、手工改库。
+  // enabled 省略即视为开；token 留空时只放行本机回环地址，绑定到网卡地址前请先设口令。
+  "admin": {
+    "enabled": true,
+    "token": ""
   },
 
   // 多语言：一个条目 = 一套语言包目录，入库后按 lang 分域，互不覆盖。
   // 只扫指定语言：maplewzmeta scan -lang zh-CN；查询与站点用 ?lang= 切换。
+  // sources 决定解析哪些包：String 出名称，Item/Character 出物品，Mob/Npc/Skill/Morph/Reactor 各自成域。
   "locales": [
     {
       "lang": "zh-CN",
       "label": "简体中文",
       "wz": "wz",
-      "sources": ["String.wz", "Item.wz", "Character.wz"]
+      "sources": ["String.wz", "Item.wz", "Character.wz", "Mob.wz", "Npc.wz", "Skill.wz", "Morph.wz", "Reactor.wz"]
     }
 
     // 再加一门语言只需补一项，例如：
@@ -27,7 +37,7 @@
     //   "lang": "en",
     //   "label": "English",
     //   "wz": "wz-en",
-    //   "sources": ["String.wz", "Item.wz", "Character.wz"]
+    //   "sources": ["String.wz", "Item.wz", "Character.wz", "Mob.wz", "Npc.wz", "Skill.wz", "Morph.wz", "Reactor.wz"]
     // }
   ]
 }

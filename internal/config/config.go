@@ -16,8 +16,12 @@ import (
 // DefaultFileName 是默认配置文件名。
 const DefaultFileName = "wzconfig.json"
 
-// DefaultSources 是参与物品关联的 .wz 源；其余包（Mob/Npc/Map…）属别的实体域。
-var DefaultSources = []string{"String.wz", "Item.wz", "Character.wz"}
+// DefaultSources 是默认参与解析的 .wz 包：名称表 String.wz + 六个实体域各自的属性包。
+// 其余包（Map/Quest/Effect/UI…）目前不入库——它们要么没有稳定 ID 语义，要么不是检索对象。
+var DefaultSources = []string{
+	"String.wz", "Item.wz", "Character.wz", "Mob.wz", "Npc.wz",
+	"Skill.wz", "Morph.wz", "Reactor.wz",
+}
 
 var langRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,19}$`)
 
@@ -25,17 +29,31 @@ var langRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,19}$`)
 type Icons struct {
 	// Enabled 为 false 时，索引与 /img 路由都不会注册，页面也不显示图标列。
 	Enabled bool `json:"enabled"`
-	// Dir 是导出器产出的图片根目录，实测布局为 <Dir>/<Wz>/<类别>/<id>.img.png。
+	// Dir 是图标来源：既可以是导出器产出的图片根目录（实测布局 <Dir>/<Wz>/<类别>/<id>.img.png），
+	// 也可以是打包后的同一棵树（以 .zip 结尾，如 imgdata.zip）——
+	// 后者启动只读中央目录，取图按偏移量零拷贝，见 internal/icons。
 	Dir string `json:"dir"`
 }
 
 // Locale 是一套语言环境。
 type Locale struct {
-	Lang    string   `json:"lang"`    // 语言标识，入库作为 item.lang
+	Lang    string   `json:"lang"`    // 语言标识，入库作为各实体表的 lang 列
 	Label   string   `json:"label"`   // 界面显示名
 	Wz      string   `json:"wz"`      // 该语言的 WZ 导出根目录
 	Sources []string `json:"sources"` // 参与关联的 .wz，留空用 DefaultSources
 }
+
+// Admin 是管理页与其写接口的开关。
+type Admin struct {
+	// Enabled 为 false 时 /admin 与 /api/admin/* 一律 404。默认开。
+	Enabled *bool `json:"enabled"`
+	// Token 非空时，所有 /api/admin/* 都要带 X-Admin-Token 头；
+	// 留空则退化为"只允许本机回环地址访问"，避免误绑公网时被人改库。
+	Token string `json:"token"`
+}
+
+// On 返回管理接口是否启用（未配置时按启用处理）。
+func (a Admin) On() bool { return a.Enabled == nil || *a.Enabled }
 
 // Config 是运行期总配置。
 type Config struct {
@@ -43,6 +61,7 @@ type Config struct {
 	Addr    string   `json:"addr"`
 	Workers int      `json:"workers"`
 	Icons   Icons    `json:"icons"`
+	Admin   Admin    `json:"admin"`
 	Locales []Locale `json:"locales"`
 
 	// Path 是配置文件绝对路径；相对字段都以它所在目录为基准解析。
@@ -174,9 +193,9 @@ func (c Config) validate() error {
 		}
 	}
 	if c.Icons.Enabled {
-		st, err := os.Stat(c.Icons.Dir)
-		if err != nil || !st.IsDir() {
-			return fmt.Errorf("config: icons.enabled 为 true，但 icons.dir 不存在或不是目录: %s", c.Icons.Dir)
+		// 图标来源可以是目录，也可以是打包好的 zip（见 internal/icons），两者都只要求"存在"。
+		if _, err := os.Stat(c.Icons.Dir); err != nil {
+			return fmt.Errorf("config: icons.enabled 为 true，但 icons.dir 不存在: %s", c.Icons.Dir)
 		}
 	}
 	return nil

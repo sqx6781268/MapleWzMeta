@@ -54,9 +54,11 @@ func TestNormalizeID(t *testing.T) {
 			t.Errorf("NormalizeID(%q) = %q，期望 %q", in, got, want)
 		}
 	}
-	if !extract.LooksLikeItemID("1010000") || extract.LooksLikeItemID("100100") ||
-		extract.LooksLikeItemID("101000") || extract.LooksLikeItemID("abc12345") {
-		t.Error("LooksLikeItemID 判定不符：只接受 7 或 8 位纯数字")
+	if !extract.LooksLikeID(extract.KindItem, "", "1010000") ||
+		extract.LooksLikeID(extract.KindItem, "", "101000") ||
+		extract.LooksLikeID(extract.KindItem, "", "100100") ||
+		extract.LooksLikeID(extract.KindItem, "", "abc12345") {
+		t.Error("物品域位数判定不符：只接受 7 或 8 位纯数字")
 	}
 }
 
@@ -74,7 +76,7 @@ func TestNamesFromAllStringLayouts(t *testing.T) {
 		{"String.wz/Eqp.img.xml", "01010000", "褐色落腮胡", "Accessory"},
 	}
 	for _, c := range cases {
-		names := extract.Names(load(t, c.file))
+		names := extract.Names(c.file, load(t, c.file))
 		if len(names) == 0 {
 			t.Fatalf("%s 未抽到任何名称", c.file)
 		}
@@ -134,7 +136,7 @@ func TestInfosFromItemAndCharacter(t *testing.T) {
 
 // 端到端：String.wz 的名称与 Character.wz 的属性按 ID 关联。
 func TestBindEndToEnd(t *testing.T) {
-	names := extract.Names(load(t, "String.wz/Eqp.img.xml"))
+	names := extract.Names("String.wz/Eqp.img.xml", load(t, "String.wz/Eqp.img.xml"))
 	infos := extract.Infos("Character.wz/Accessory/01010000.img.xml", load(t, "Character.wz/Accessory/01010000.img.xml"))
 
 	items := binder.Bind(names, infos)
@@ -191,4 +193,234 @@ func TestBindInfoOnly(t *testing.T) {
 	if len(st.NoNameIDs) != 2 || st.NoNameIDs[0] != "04300000" {
 		t.Errorf("NoNameIDs = %v", st.NoNameIDs)
 	}
+}
+
+// 名称侧白名单：只有登记过的表才产出行。
+// 没登记的表（MonsterBook / Map 等）一条都不许出，否则就是 docs/附录 §4 记的跨实体名称污染；
+// `Skill` 表登记给了技能域，改由 NameKindOf 校验它归到 skill 而非 item。
+func TestNameWhitelistSkipsOtherDomains(t *testing.T) {
+	for _, f := range []string{"String.wz/MonsterBook.img.xml", "String.wz/Map.img.xml"} {
+		if got := extract.Names(f, load(t, f)); len(got) != 0 {
+			t.Errorf("%s 不该产出任何条目，实际 %d 条", f, len(got))
+		}
+	}
+	// Skill 表在册，但域必须是 skill——认成 item 就会写进物品表。
+	if k, ok := extract.NameKindOf("String.wz/Skill.img.xml"); !ok || k != extract.KindSkill {
+		t.Errorf("String.wz/Skill.img.xml 应归 skill 域，实际 %s/%v", k, ok)
+	}
+}
+
+func TestKindOfAndNameKindOf(t *testing.T) {
+	cases := []struct {
+		rel  string
+		want extract.Kind
+	}{
+		{"Mob.wz/0000021.img.xml", extract.KindMob},
+		{"Npc.wz/0000700.img.xml", extract.KindNPC},
+		{"Item.wz/Etc/0430.img.xml", extract.KindItem},
+		{"Character.wz/Cap/01002000.img.xml", extract.KindItem},
+		{"Skill.wz/000.img.xml", extract.KindSkill},
+		{"Morph.wz/0001.img.xml", extract.KindMorph},
+		{"Reactor.wz/0002000.img.xml", extract.KindReactor},
+	}
+	for _, c := range cases {
+		if got := extract.KindOf(c.rel); got != c.want {
+			t.Errorf("KindOf(%s) = %s，期望 %s", c.rel, got, c.want)
+		}
+	}
+	nameCases := map[string]extract.Kind{
+		"String.wz/Mob.img.xml":         extract.KindMob,
+		"String.wz/Npc.img.xml":         extract.KindNPC,
+		"String.wz/Eqp.img.xml":         extract.KindItem,
+		"String.wz/Pet.img.xml":         extract.KindItem,
+		"String.wz/Skill.img.xml":       extract.KindSkill,
+		"String.wz/ToolTipHelp.img.xml": "",
+		"Item.wz/Etc/0430.img.xml":      "",
+	}
+	for rel, want := range nameCases {
+		k, ok := extract.NameKindOf(rel)
+		if want == "" {
+			if ok {
+				t.Errorf("NameKindOf(%s) 不该在白名单里", rel)
+			}
+			continue
+		}
+		if !ok || k != want {
+			t.Errorf("NameKindOf(%s) = %s/%v，期望 %s", rel, k, ok, want)
+		}
+	}
+}
+
+// Hair/Face 的名称用 5 位 ID 写在 Eqp 表里（实测 22,691 条），只对这张表放行；
+// 怪物表的键有位数不等的写法（`21` 僵尸蘑菇、`1110100` 绿蘑菇），按数值归一到 8 位。
+func TestNameIDLimitsPerDomain(t *testing.T) {
+	eqp := extract.Names("String.wz/Eqp.img.xml", load(t, "String.wz/Eqp.img.xml"))
+	if hit := findByNameID(eqp, "00020000"); hit == nil {
+		t.Error("Eqp 的 5 位键 20000 应归一为 00020000 并抽到名称")
+	} else if hit.Name != "酷-男脸(黑色)" {
+		t.Errorf("00020000 名称 = %q", hit.Name)
+	}
+	// 位数门槛只对 Eqp 放宽：Consume 表里没有 5 位键，判据不受影响。
+	if extract.LooksLikeID(extract.KindItem, "Consume", "20000") {
+		t.Error("非 Eqp 表不该放行 5 位 ID")
+	}
+
+	mob := extract.Names("String.wz/Mob.img.xml", load(t, "String.wz/Mob.img.xml"))
+	for _, c := range []struct{ id, name string }{
+		{"01110100", "绿蘑菇"},
+		{"00100100", "蜗牛"},
+		{"00000021", "僵尸蘑菇"},
+	} {
+		hit := findByNameID(mob, c.id)
+		if hit == nil {
+			t.Errorf("怪物表未抽到 %s（共 %d 条）", c.id, len(mob))
+			continue
+		}
+		if hit.Name != c.name {
+			t.Errorf("%s 名称 = %q，期望 %q", c.id, hit.Name, c.name)
+		}
+	}
+}
+
+func findByNameID(list []extract.NameEntry, id string) *extract.NameEntry {
+	for i := range list {
+		if list[i].ID == id {
+			return &list[i]
+		}
+	}
+	return nil
+}
+
+// "一个文件即一个实体"的形态要全部认出来：旧实现只对 Character.wz 开特判，
+// 于是 Item.wz/Pet 的 461 个宠物道具、以及 Mob.wz/Npc.wz 整批属性漏抽。
+func TestRootIDForSingleFileEntities(t *testing.T) {
+	cases := map[string]string{
+		"Character.wz/Accessory/01010000.img.xml": "01010000",
+		"Item.wz/Pet/5000000.img.xml":             "05000000",
+		"Mob.wz/0000021.img.xml":                  "00000021",
+		"Npc.wz/0000700.img.xml":                  "00000700",
+		// 分组文件根名同为数字但只有 4 位，不能当实体 ID。
+		"Item.wz/Etc/0430.img.xml": "",
+	}
+	for rel, want := range cases {
+		got := extract.RootID(rel, load(t, rel))
+		if got != want {
+			t.Errorf("RootID(%s) = %q，期望 %q", rel, got, want)
+		}
+	}
+
+	mobInfos := extract.Infos("Mob.wz/0000021.img.xml", load(t, "Mob.wz/0000021.img.xml"))
+	if len(mobInfos) != 1 {
+		t.Fatalf("Mob 单文件应得 1 条，实际 %d", len(mobInfos))
+	}
+	mi := mobInfos[0]
+	if mi.ID != "00000021" || mi.Kind != extract.KindMob || mi.Source != "Mob.wz" {
+		t.Errorf("怪物记录异常: %+v", mi)
+	}
+	if mi.Info["level"] != "24" || mi.Info["maxHP"] != "443" {
+		t.Errorf("怪物 info 抽取异常: %+v", mi.Info)
+	}
+
+	petInfos := extract.Infos("Item.wz/Pet/5000000.img.xml", load(t, "Item.wz/Pet/5000000.img.xml"))
+	if len(petInfos) != 1 || petInfos[0].ID != "05000000" || petInfos[0].Kind != extract.KindItem {
+		t.Fatalf("Item.wz/Pet 应抽到 1 条物品属性，实际 %+v", petInfos)
+	}
+}
+
+// `Mob.wz/QuestCountGroup/` 下的文件同样是 7 位怪物号，但它是"怪物 → 任务计数"的查表，
+// 不是怪物本体：怪物/NPC 只认紧贴包根目录的那一层文件。
+func TestMobSubdirLookupTablesAreSkipped(t *testing.T) {
+	rel := "Mob.wz/QuestCountGroup/0210100.img.xml"
+	if got := extract.Infos(rel, load(t, rel)); len(got) != 0 {
+		t.Errorf("QuestCountGroup 查表不该产出怪物属性，实际 %+v", got)
+	}
+	ok := extract.Infos("Mob.wz/0000021.img.xml", load(t, "Mob.wz/0000021.img.xml"))
+	if len(ok) != 1 || ok[0].Info["level"] != "24" {
+		t.Errorf("包根下的怪物文件仍应正常抽取: %+v", ok)
+	}
+}
+
+// `Character.wz` 根级那 18 个文件没有类别目录，按 islot 归成皮肤：
+// Bd 是身体皮肤、Hd 是纸娃娃基础头部（画布名分别是 body / head）。
+func TestRootLevelSkinsGetCategoryFromIslot(t *testing.T) {
+	cases := map[string]string{
+		"Character.wz/00002001.img.xml": "BodySkin",
+		"Character.wz/00012000.img.xml": "HeadSkin",
+		// 有类别目录的不受影响，仍然按目录取名。
+		"Character.wz/Accessory/01010000.img.xml": "Accessory",
+	}
+	for rel, want := range cases {
+		got := extract.Infos(rel, load(t, rel))
+		if len(got) != 1 {
+			t.Fatalf("%s 应得 1 条，实际 %d", rel, len(got))
+		}
+		if got[0].Category != want {
+			t.Errorf("%s 分类 = %q，期望 %q", rel, got[0].Category, want)
+		}
+	}
+}
+
+// 三个新域（技能 / 变身 / 反应堆）各自的数据形态：
+//   - 技能：组文件再套一层（`skill/<7 位 ID>`），节点没有 info 子目录，数值在 level/1；
+//   - 变身：4 位实体号，RootID 单独放宽到 4 位；无名称表；
+//   - 反应堆：7 位一文件一实体；无名称表，数据里只有韩文 info。
+func TestSkillMorphReactorDomains(t *testing.T) {
+	// 技能名称来自 String.wz/Skill.img.xml（7 位键）。
+	names := extract.Names("String.wz/Skill.img.xml", load(t, "String.wz/Skill.img.xml"))
+	if hit := findByNameID(names, "00000008"); hit == nil {
+		t.Fatalf("技能表未抽到 00000008（共 %d 条）", len(names))
+	} else if hit.Name != "群宠" {
+		t.Errorf("00000008 名称 = %q，期望 群宠", hit.Name)
+	}
+	// 组键 `000` 只有 bookName、没有 name，不该被当成技能实体产出行。
+	if hit := findByNameID(names, "00000000"); hit != nil {
+		t.Errorf("组键不该产出行，却抽到 %q", hit.Name)
+	}
+
+	// 技能属性：ID 在 skill/ 下，且节点没有 info 子目录。
+	skills := extract.Infos("Skill.wz/000.img.xml", load(t, "Skill.wz/000.img.xml"))
+	if len(skills) == 0 {
+		t.Fatal("Skill.wz/000.img.xml 未产出技能条目")
+	}
+	s := findInfoByID(skills, "00001001")
+	if s == nil {
+		t.Fatalf("未抽到技能 00001001（共 %d 条）", len(skills))
+	}
+	if s.Kind != extract.KindSkill {
+		t.Errorf("技能 Kind = %s，期望 %s", s.Kind, extract.KindSkill)
+	}
+	if _, ok := s.Info["level1.mpCon"]; !ok {
+		t.Errorf("技能应含 level1.mpCon，实际 %v", s.Info)
+	}
+
+	// 变身：4 位实体号，RootID 对本包单独放宽。
+	mroot := load(t, "Morph.wz/0001.img.xml")
+	if got := extract.RootID("Morph.wz/0001.img.xml", mroot); got != "00000001" {
+		t.Errorf("Morph RootID = %q，期望 00000001", got)
+	}
+	mi := extract.Infos("Morph.wz/0001.img.xml", mroot)
+	if len(mi) != 1 || mi[0].Kind != extract.KindMorph {
+		t.Fatalf("Morph 应产出 1 条 morph 记录，实际 %+v", mi)
+	}
+	if mi[0].Info["speed"] == "" {
+		t.Errorf("Morph 应有 speed 属性，实际 %v", mi[0].Info)
+	}
+
+	// 反应堆：7 位一文件一实体。
+	ri := extract.Infos("Reactor.wz/0002000.img.xml", load(t, "Reactor.wz/0002000.img.xml"))
+	if len(ri) != 1 || ri[0].Kind != extract.KindReactor {
+		t.Fatalf("Reactor 应产出 1 条 reactor 记录，实际 %+v", ri)
+	}
+	if ri[0].ID != "00002000" {
+		t.Errorf("Reactor ID = %q，期望 00002000", ri[0].ID)
+	}
+}
+
+func findInfoByID(list []extract.InfoEntry, id string) *extract.InfoEntry {
+	for i := range list {
+		if list[i].ID == id {
+			return &list[i]
+		}
+	}
+	return nil
 }

@@ -35,14 +35,24 @@ type Server struct {
 	db    *store.DB
 	icons *icons.Index
 
-	// mu 保护 attrCache：属性键统计要展开 56k 行的 JSON，约 0.7s，按语言缓存一次即可。
+	// mu 保护 attrCache 与后台管理任务 job。
+	// 属性键统计要展开 56k 行的 JSON，约 0.7s，按语言缓存一次即可。
 	mu        sync.Mutex
+	jobSeq    int64
+	job       *adminJob
 	attrCache map[string][]metaAttr
 }
 
 // New 构造服务；ix 可为 nil。
 func New(db *store.DB, cfg config.Config, ix *icons.Index) *Server {
 	return &Server{cfg: cfg, db: db, icons: ix, attrCache: map[string][]metaAttr{}}
+}
+
+// attrCacheClear 在写操作后作废属性键缓存，避免侧边栏下拉停留在旧数据上。
+func (s *Server) attrCacheClear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attrCache = map[string][]metaAttr{}
 }
 
 // Handler 注册全部路由。
@@ -58,6 +68,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	if s.cfg.Admin.On() {
+		mux.HandleFunc("GET /admin", s.handleAdmin)
+	}
+	// 分方法注册：裸 "/api/admin/" 会比 "GET /" 多匹配方法而与根路由冲突。
+	adm := s.adminRoutes()
+	mux.Handle("GET /api/admin/", adm)
+	mux.Handle("POST /api/admin/", adm)
+	mux.Handle("DELETE /api/admin/", adm)
 	if s.icons != nil {
 		mux.HandleFunc("GET /img/", s.icons.Serve)
 	}
@@ -71,8 +89,12 @@ func (s *Server) Serve(addr string) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("查询服务已启动：http://%s （语言：%s，图标：%s）",
-		addr, strings.Join(s.cfg.Langs(), "/"), map[bool]string{true: "开", false: "关"}[s.icons != nil])
+	admin := "关"
+	if s.cfg.Admin.On() {
+		admin = "http://" + addr + "/admin"
+	}
+	log.Printf("查询服务已启动：http://%s （语言：%s，图标：%s，管理页：%s）",
+		addr, strings.Join(s.cfg.Langs(), "/"), map[bool]string{true: "开", false: "关"}[s.icons != nil], admin)
 	return srv.ListenAndServe()
 }
 
@@ -90,30 +112,54 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write(page)
 }
 
-// itemView 是对外输出的物品结构。
+// itemView 是对外输出的实体行结构（物品 / NPC / 怪物同构）。
+// `stringFiles` / `infoFiles` 只在单条详情里回填：反查要展开全表 JSON（约 0.25s），列表接口带不动。
 type itemView struct {
-	Lang      string            `json:"lang"`
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Desc      string            `json:"descr"`
-	Category  string            `json:"category"`
-	Info      map[string]string `json:"info"`
-	Icon      string            `json:"icon,omitempty"`
-	HasName   bool              `json:"hasName"`
-	HasInfo   bool              `json:"hasInfo"`
-	UpdatedAt string            `json:"updatedAt"`
+	Lang        string            `json:"lang"`
+	Kind        string            `json:"kind,omitempty"`
+	StringFiles []string          `json:"stringFiles,omitempty"`
+	InfoFiles   []string          `json:"infoFiles,omitempty"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Desc        string            `json:"descr"`
+	Category    string            `json:"category"`
+	Info        map[string]string `json:"info"`
+	Icon        string            `json:"icon,omitempty"`
+	HasName     bool              `json:"hasName"`
+	HasInfo     bool              `json:"hasInfo"`
+	Edited      bool              `json:"edited,omitempty"`
+	UpdatedAt   string            `json:"updatedAt"`
 }
 
 func (s *Server) toView(it store.ItemRow) itemView {
+	kind := string(it.Kind)
 	v := itemView{
-		Lang: it.Lang, ID: it.ID, Name: it.Name, Desc: it.Descr, Category: it.Category,
-		Info: it.Info, HasName: it.HasName, HasInfo: it.HasInfo,
+		Lang: it.Lang, Kind: kind, ID: it.ID, Name: it.Name, Desc: it.Descr, Category: it.Category,
+		Info: it.Info, HasName: it.HasName, HasInfo: it.HasInfo, Edited: it.Edited,
 		UpdatedAt: it.Updated.Format("2006-01-02 15:04:05"),
 	}
-	if s.icons != nil && s.icons.Has(it.ID) {
+	if s.icons != nil && s.icons.Has(kind, it.ID) {
 		v.Icon = "/img/" + it.ID + ".png"
+		if kind != "" && kind != string(store.KindItem) {
+			// 图标域必须跟着实体走：物品行不再接受 Npc 域的图片顶替（docs/附录 §6 的串味）。
+			v.Icon += "?for=" + kind
+		}
 	}
 	return v
+}
+
+// kindOf 解析 ?kind=。缺省按物品（保住既有链接与脚本），显式传陌生值直接 400。
+func kindOf(r *http.Request) (store.Kind, string) {
+	raw := strings.TrimSpace(r.URL.Query().Get("kind"))
+	k, ok := store.ParseKind(raw)
+	if !ok {
+		names := make([]string, len(store.Kinds))
+		for i, kk := range store.Kinds {
+			names[i] = string(kk)
+		}
+		return store.KindItem, "kind 只能是 " + strings.Join(names, " / ")
+	}
+	return k, ""
 }
 
 func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
@@ -137,7 +183,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		out = append(out, s.toView(it))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"lang": lang, "total": total, "limit": q.Limit, "offset": q.Offset, "items": out,
+		"lang": lang, "kind": string(q.Kind), "total": total, "limit": q.Limit, "offset": q.Offset, "items": out,
 	})
 }
 
@@ -147,27 +193,42 @@ func (s *Server) handleItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, bad, http.StatusBadRequest)
 		return
 	}
+	kind, bad := kindOf(r)
+	if bad != "" {
+		http.Error(w, bad, http.StatusBadRequest)
+		return
+	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
 		http.Error(w, "缺少参数 id", http.StatusBadRequest)
 		return
 	}
-	it, ok, err := s.db.Get(lang, id)
+	it, ok, err := s.db.Get(kind, lang, id)
 	if err != nil {
 		http.Error(w, "查询失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if !ok {
-		http.Error(w, "物品不存在: "+lang+"/"+id, http.StatusNotFound)
+		http.Error(w, "记录不存在: "+lang+"/"+string(kind)+"/"+id, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.toView(it))
+	writeJSON(w, http.StatusOK, s.detailView(kind, lang, it))
 }
 
-// statsView 在库内概况上追加与图标开关有关的服务端事实。
+// detailView 在普通行视图上补一份来源溯源，供详情浮层显示"这条数据是哪个文件给的"。
+func (s *Server) detailView(kind store.Kind, lang string, it store.ItemRow) itemView {
+	v := s.toView(it)
+	if src, err := s.db.SourcesBySide(kind, lang, it.ID); err == nil {
+		v.StringFiles, v.InfoFiles = src.Name, src.Info
+	}
+	return v
+}
+
+// statsView 在库内概况上追加与图标/管理开关有关的服务端事实。
 type statsView struct {
 	store.Totals
 	IconsOn bool `json:"iconsOn"`
+	AdminOn bool `json:"adminOn"`
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -176,12 +237,17 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, bad, http.StatusBadRequest)
 		return
 	}
-	st, err := s.db.Stats(lang)
+	kind, bad := kindOf(r)
+	if bad != "" {
+		http.Error(w, bad, http.StatusBadRequest)
+		return
+	}
+	st, err := s.db.Stats(kind, lang)
 	if err != nil {
 		http.Error(w, "统计失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, statsView{Totals: st, IconsOn: s.icons != nil})
+	writeJSON(w, http.StatusOK, statsView{Totals: st, IconsOn: s.icons != nil, AdminOn: s.cfg.Admin.On()})
 }
 
 func (s *Server) handleCategories(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +256,12 @@ func (s *Server) handleCategories(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, bad, http.StatusBadRequest)
 		return
 	}
-	cats, err := s.db.Categories(lang)
+	kind, bad := kindOf(r)
+	if bad != "" {
+		http.Error(w, bad, http.StatusBadRequest)
+		return
+	}
+	cats, err := s.db.Categories(kind, lang)
 	if err != nil {
 		http.Error(w, "统计失败: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -216,8 +287,13 @@ type metaAttr struct {
 }
 
 func (s *Server) handleLangs(w http.ResponseWriter, r *http.Request) {
+	kind, bad := kindOf(r)
+	if bad != "" {
+		http.Error(w, bad, http.StatusBadRequest)
+		return
+	}
 	inDB := map[string]store.LangCount{}
-	list, err := s.db.Langs()
+	list, err := s.db.Langs(kind)
 	if err != nil {
 		http.Error(w, "统计失败: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -245,19 +321,22 @@ type catOption struct {
 // metaReply 是 /api/meta 的返回体。
 type metaReply struct {
 	Lang          string      `json:"lang"`
+	Kind          string      `json:"kind"`
 	Uncategorized string      `json:"uncategorized"`
 	Categories    []catOption `json:"categories"`
 	Attrs         []metaAttr  `json:"attrs"`
 }
 
-// metaAttrs 按语言缓存"库内真实存在的属性键 + 中文说明"。
-func (s *Server) metaAttrs(lang string) ([]metaAttr, error) {
+// metaAttrs 按"实体域 + 语言"缓存"库内真实存在的属性键 + 中文说明"。
+// 三个域的 info 完全不同（物品看 reqLevel、怪物看 maxHP），缓存键必须带域。
+func (s *Server) metaAttrs(kind store.Kind, lang string) ([]metaAttr, error) {
+	key := string(kind) + "|" + lang
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if v, ok := s.attrCache[lang]; ok {
+	if v, ok := s.attrCache[key]; ok {
 		return v, nil
 	}
-	ks, err := s.db.AttrKeys(lang, 0)
+	ks, err := s.db.AttrKeys(kind, lang, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -267,12 +346,12 @@ func (s *Server) metaAttrs(lang string) ([]metaAttr, error) {
 			continue
 		}
 		m := metaAttr{Key: k.Key, Kind: "text", Count: k.Count}
-		if d, ok := attrMetaOf[k.Key]; ok {
+		if d, ok := attrMetaFor(string(kind), k.Key); ok {
 			m.Label, m.Kind, m.Preset = d.Label, d.Kind, d.Preset
 		}
 		out = append(out, m)
 	}
-	s.attrCache[lang] = out
+	s.attrCache[key] = out
 	return out, nil
 }
 
@@ -283,17 +362,22 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, bad, http.StatusBadRequest)
 		return
 	}
-	cats, err := s.db.Categories(lang)
+	kind, bad := kindOf(r)
+	if bad != "" {
+		http.Error(w, bad, http.StatusBadRequest)
+		return
+	}
+	cats, err := s.db.Categories(kind, lang)
 	if err != nil {
 		http.Error(w, "统计失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	attrs, err := s.metaAttrs(lang)
+	attrs, err := s.metaAttrs(kind, lang)
 	if err != nil {
 		http.Error(w, "统计失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	out := metaReply{Lang: lang, Uncategorized: store.NoCategoryName,
+	out := metaReply{Lang: lang, Kind: string(kind), Uncategorized: store.NoCategoryName,
 		Categories: make([]catOption, 0, len(cats)), Attrs: attrs}
 	for _, c := range cats {
 		label := categoryLabel(c.Name)
@@ -320,7 +404,12 @@ func (s *Server) langOf(r *http.Request) (string, string) {
 // queryFrom 把 URL 参数换成检索条件；返回非空字符串表示参数非法。
 func queryFrom(r *http.Request, lang string) (store.Query, string) {
 	vals := r.URL.Query()
+	kind, bad := kindOf(r)
+	if bad != "" {
+		return store.Query{}, bad
+	}
 	q := store.Query{
+		Kind:  kind,
 		Lang:  lang,
 		Limit: atoi(vals.Get("limit"), 50), Offset: atoi(vals.Get("offset"), 0),
 	}

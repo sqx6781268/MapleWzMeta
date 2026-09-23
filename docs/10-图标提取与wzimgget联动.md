@@ -37,8 +37,7 @@ wzimgget 明确不支持 `.wz` 容器与 `list.wz`，所以它无法替本项目
 本项目也不解析任何二进制 `.img`。**不要试图把 `Data/` 直接指给 `locales[].wz`**。
 
 ## 3. 格式对齐清单
-
-wzimgget 的输出天然满足本项目的索引要求，逐项对照（索引实现见 `internal/icons/icons.go:42` `Build`）：
+wzimgget 的输出天然满足本项目的索引要求，逐项对照（索引实现见 `internal/icons/icons.go:58` `Build`）：
 
 | 约定 | wzimgget 产出 | 本项目要求 | 结论 |
 |---|---|---|---|
@@ -47,6 +46,26 @@ wzimgget 的输出天然满足本项目的索引要求，逐项对照（索引�
 | 类别层 | 可选（`Npc` 平铺无类别层） | `filepath.WalkDir` 递归，层数不限 | 直接匹配 |
 | ID 位数 | 保留原 IMG ID，`Npc` 常见 7 位 | `extract.NormalizeID` 左补零到 8 位 | 归一后与 `item.id` 对齐 |
 | 同 ID 冲突 | 不同包可能同号 | 按 `Item` > `Character` > 其他 取优先级（`icons.go:81` `rankOf`） | 本项目侧决定 |
+
+### 打包成 zip 交给本项目（可选）
+
+`imgdata/` 两万多张小图也可以先打包再用：把 `icons.dir` 指到 `imgdata.zip` 即可，读取链路见
+[08 §zip 来源的读取方式](08-命令行与查询接口.md)。打包要求（都不满足也只是退回目录语义，不会读出错图）：
+
+| 约定 | 为什么 |
+|---|---|
+| 条目路径保持 `<域>/<类别>/<id>.img.png`，可以整体多套一层 `imgdata/` | 首段就是实体域，多套一层会被自动剥掉 |
+| 用 **Store**（不压缩）打包 | 本项目按 `DataOffset` 零拷贝直读；deflate 会退回解压，能用但慢 |
+| 条目名用 `/` 分隔 | 老版 `Compress-Archive` 写 `\`，代码里会归一，但别指望它 |
+
+```bash
+# PowerShell：-CompressionLevel NoCompression 即 Store
+Compress-Archive -Path imgdata -DestinationPath imgdata.zip -CompressionLevel NoCompression
+# 之后把 wzconfig.json 的 icons.dir 改成 "imgdata.zip"，重启 serve
+```
+
+实测（本机 28,504 张）：zip 35.6 MB、启动建索引 75ms、单张读取 58µs（目录方式 598µs），
+两种来源的可用 ID 数与图片字节完全一致。**换 zip 要重启 `serve`**，索引只在启动时建。
 
 要点：**图标不落库**。`imgdata` 只在 `serve` / `stats` 启动时建内存索引，重跑 `scan` 与图标无关；
 补导图标也**不需要**重新 `scan`，重启 `serve` 即可。
@@ -71,6 +90,12 @@ wzimgget.exe extract D:\game\Data -out D:\ASM\MapleWzMeta\imgdata
 启动日志的「图标索引」一行就是联是否成功的判据：**数为 0 即目录指错**。
 
 ## 5. 图标缺口对账（2026-09-22 本机实测）
+
+> **2026-09-23 更新**：最新 `imgdata.zip` 已扩到 **37,109 张**（`Character` 20,681 / `Npc` 7,465 / `Item` 6,590 /
+> `Mob` 1,865 / `Reactor` 365 / `Morph` 72 / `Skill` 71），wzimgget 七类资源全部有图。
+> 本项目侧同步把 **技能 / 变身 / 反应堆** 三个实体域纳入解析（见 [docs/09](09-验证基线与已知缺陷.md) §2），
+> 所以下面 2026-09-22 的缺口表里"`Mob` 目录不存在""`Item` 侧只有一个 `Pet`"两条**已不成立**，
+> 保留作历史口径；当前判据看 `serve` 启动日志的「按域」一行。
 
 磁盘 `imgdata` 共 **28,504 个 PNG**，索引到 **28,503 个文件 / 28,307 个可用 ID**。
 三个差值都不是缺陷：

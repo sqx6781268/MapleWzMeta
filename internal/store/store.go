@@ -3,8 +3,11 @@
 // 只用标准库 database/sql + 纯 Go 驱动 modernc.org/sqlite：本机没有 gcc，
 // 任何需要 cgo 的驱动（mattn/go-sqlite3）都编译不了，这里刻意避开。
 //
-// 数据按语言分域：item/wz_file 的主键都是 (lang, ...)，同一 ID 在不同语言包下
+// 数据按语言分域：item/npc/mob/wz_file 的主键都含 lang，同一 ID 在不同语言包下
 // 各存一行，互不覆盖；图标与语言无关，不落库。
+//
+// 实体域（Kind）决定行落在哪张表：物品、NPC、怪物共用一套同构 schema，
+// 但必须分表——三个域的 ID 空间整体重叠，同表就会互相覆盖名称。
 package store
 
 import (
@@ -18,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sqx6781268/MapleWzMeta/internal/extract"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -26,8 +31,53 @@ import (
 const LegacyLang = "zh-CN"
 
 // NoCategoryName 是"分类为空"在统计里的显示名。
-// 它不是真实分类，检索时会被翻译回 category = ''。
+// 它不是真实分类，检索时会被翻译回 category = ”。
 const NoCategoryName = "(未分类)"
+
+// Kind 是实体域，决定行落在哪张表。取值与 extract.Kind 一致，
+// 由 scan 从文件路径推导后传入；存储层自己不做路径判断，避免规则两处漂移。
+type Kind string
+
+const (
+	KindItem    Kind = "item"
+	KindNPC     Kind = "npc"
+	KindMob     Kind = "mob"
+	KindSkill   Kind = "skill"
+	KindMorph   Kind = "morph"
+	KindReactor Kind = "reactor"
+)
+
+// Kinds 是全部实体域，顺序即界面展示顺序。
+var Kinds = []Kind{KindItem, KindNPC, KindMob, KindSkill, KindMorph, KindReactor}
+
+// ParseKind 解析外部输入；空串按物品处理（保持既有调用方与老链接兼容）。
+func ParseKind(s string) (Kind, bool) {
+	switch Kind(s) {
+	case "", KindItem:
+		return KindItem, true
+	case KindNPC, KindMob, KindSkill, KindMorph, KindReactor:
+		return Kind(s), true
+	}
+	return KindItem, false
+}
+
+// table 返回该实体域的表名。未知域回落 item——表名要拼进 SQL，
+// 这里必须是白名单映射，不能接受外部字符串。
+func (k Kind) table() string {
+	switch k {
+	case KindNPC:
+		return "npc"
+	case KindMob:
+		return "mob"
+	case KindSkill:
+		return "skill"
+	case KindMorph:
+		return "morph"
+	case KindReactor:
+		return "reactor"
+	}
+	return "item"
+}
 
 // idPadLen 是物品 ID 的入库定长位数（与 extract.IDLen 一致）。
 // 用户手输的常是原始 7 位号段，前缀检索要能同时命中补零形式。
@@ -49,10 +99,17 @@ type FileRec struct {
 	Repaired  int
 	Rows      int // 该文件贡献的名称/属性条目数
 	ScannedAt time.Time
+	// IDs 是该文件贡献的物品 ID，用于"文件变动后精确覆盖"。
+	// 旧库这一列是空数组，此时重载只能覆盖解析到的字段，无法反查并清除历史贡献。
+	IDs []string
+	// Kind 是该文件所属实体域，决定 IDs 写进溯源时的前缀。
+	Kind Kind
 }
 
-// ItemRow 是关联后的物品行。字段标签与 /api 返回一致，便于 CLI 导出。
+// ItemRow 是关联后的实体行（物品 / NPC / 怪物同构，按 Kind 区分）。
+// 字段标签与 /api 返回一致，便于 CLI 导出。
 type ItemRow struct {
+	Kind     Kind              `json:"kind,omitempty"`
 	Lang     string            `json:"lang"`
 	ID       string            `json:"id"`
 	Name     string            `json:"name"`
@@ -61,7 +118,35 @@ type ItemRow struct {
 	Info     map[string]string `json:"info"`
 	HasName  bool              `json:"hasName"`
 	HasInfo  bool              `json:"hasInfo"`
+	Edited   bool              `json:"edited"` // 是否在管理页手工改过（重载时默认跳过）
 	Updated  time.Time         `json:"updatedAt,omitzero"`
+}
+
+// entityTable 是三张同构实体表（item / npc / mob）的 DDL 模板。
+// 三个域共用"名称侧 + 属性侧合并成一行"的形状，但必须分表：
+// 实测怪物/NPC 的 ID 补零后与物品 ID 整体重叠，同表就是 4,347 条名称污染。
+const entityTable = `
+CREATE TABLE IF NOT EXISTS %s (
+  lang       TEXT NOT NULL,
+  id         TEXT NOT NULL,
+  name       TEXT NOT NULL DEFAULT '',
+  descr      TEXT NOT NULL DEFAULT '',
+  category   TEXT NOT NULL DEFAULT '',
+  info       TEXT NOT NULL DEFAULT '{}',
+  has_name   INTEGER NOT NULL DEFAULT 0,
+  has_info   INTEGER NOT NULL DEFAULT 0,
+  edited     INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (lang, id)
+);
+CREATE INDEX IF NOT EXISTS idx_%s_name ON %s(lang, name);
+CREATE INDEX IF NOT EXISTS idx_%s_cat ON %s(lang, category);
+`
+
+// entityDDL 生成某个实体域的建表语句。表名只来自 Kind.table() 的白名单。
+func entityDDL(kind Kind) string {
+	t := kind.table()
+	return fmt.Sprintf(entityTable, t, t, t, t, t)
 }
 
 const schema = `
@@ -75,22 +160,9 @@ CREATE TABLE IF NOT EXISTS wz_file (
   repaired   INTEGER NOT NULL DEFAULT 0,
   rows       INTEGER NOT NULL DEFAULT 0,
   scanned_at INTEGER NOT NULL,
+  ids        TEXT NOT NULL DEFAULT '[]',
   PRIMARY KEY (lang, path)
 );
-CREATE TABLE IF NOT EXISTS item (
-  lang       TEXT NOT NULL,
-  id         TEXT NOT NULL,
-  name       TEXT NOT NULL DEFAULT '',
-  descr      TEXT NOT NULL DEFAULT '',
-  category   TEXT NOT NULL DEFAULT '',
-  info       TEXT NOT NULL DEFAULT '{}',
-  has_name   INTEGER NOT NULL DEFAULT 0,
-  has_info   INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (lang, id)
-);
-CREATE INDEX IF NOT EXISTS idx_item_name ON item(lang, name);
-CREATE INDEX IF NOT EXISTS idx_item_cat ON item(lang, category);
 CREATE TABLE IF NOT EXISTS scan_run (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   lang        TEXT NOT NULL DEFAULT '',
@@ -132,6 +204,29 @@ func (d *DB) init() error {
 	}
 	if _, err := d.sqlDB.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("建表失败: %w", err)
+	}
+	// 实体表按域各建一张。IF NOT EXISTS，旧库升级即"多出两张空表"，不动 item 数据。
+	for _, k := range Kinds {
+		if _, err := d.sqlDB.ExecContext(ctx, entityDDL(k)); err != nil {
+			return fmt.Errorf("建实体表 %s: %w", k.table(), err)
+		}
+	}
+	// 后加的列：老库（含已扫完的正式库）只补列不清数据，默认值即"未参与溯源/未手工修改"。
+	type col struct{ table, name, ddl string }
+	for _, c := range []col{
+		{"item", "edited", `ALTER TABLE item ADD COLUMN edited INTEGER NOT NULL DEFAULT 0`},
+		{"wz_file", "ids", `ALTER TABLE wz_file ADD COLUMN ids TEXT NOT NULL DEFAULT '[]'`},
+	} {
+		has, err := d.hasColumn(ctx, c.table, c.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := d.sqlDB.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("补列 %s.%s: %w", c.table, c.name, err)
+		}
 	}
 	return nil
 }
@@ -190,6 +285,12 @@ func (d *DB) migrateLegacy(ctx context.Context) error {
 		}
 		if _, err := d.sqlDB.ExecContext(ctx, schema); err != nil {
 			return err
+		}
+		// item 的 DDL 不在 schema 里（三张实体表由 entityDDL 生成），这里补建被重命名走的那张。
+		if j.table == KindItem.table() {
+			if _, err := d.sqlDB.ExecContext(ctx, entityDDL(KindItem)); err != nil {
+				return err
+			}
 		}
 		insert := fmt.Sprintf(`INSERT OR IGNORE INTO %s(lang,%s) SELECT ?,%s FROM %s`,
 			j.table, j.columns, j.columns, old)
@@ -280,10 +381,11 @@ func (d *DB) SaveFiles(lang string, recs []FileRec) error {
 		return err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(`INSERT INTO wz_file(lang,path,size,mtime,status,err,repaired,rows,scanned_at)
-		VALUES(?,?,?,?,?,?,?,?,?)
+	stmt, err := tx.Prepare(`INSERT INTO wz_file(lang,path,size,mtime,status,err,repaired,rows,scanned_at,ids)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(lang,path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, status=excluded.status,
-		  err=excluded.err, repaired=excluded.repaired, rows=excluded.rows, scanned_at=excluded.scanned_at`)
+		  err=excluded.err, repaired=excluded.repaired, rows=excluded.rows, scanned_at=excluded.scanned_at,
+		  ids=excluded.ids`)
 	if err != nil {
 		return err
 	}
@@ -293,22 +395,44 @@ func (d *DB) SaveFiles(lang string, recs []FileRec) error {
 		if status == "" {
 			status = "ok"
 		}
-		if _, err := stmt.Exec(lang, r.Path, r.Size, r.ModTime.Unix(), status, r.Err, r.Repaired, r.Rows, time.Now().Unix()); err != nil {
+		ids, err := marshalIDs(r.Kind, r.IDs)
+		if err != nil {
+			return err
+		}
+		if _, err := stmt.Exec(lang, r.Path, r.Size, r.ModTime.Unix(), status, r.Err, r.Repaired, r.Rows, time.Now().Unix(), ids); err != nil {
 			return fmt.Errorf("写入文件记录 %s: %w", r.Path, err)
 		}
 	}
 	return tx.Commit()
 }
 
-// NameArg 是名称侧的入库参数。
+// NameArg 是名称侧的入库参数。Kind 为空按物品处理。
+// Src 是贡献这条记录的文件相对路径：落库前按 (Kind, ID, Src) 排序，
+// 同一个 ID 被多个文件写入时胜者固定，不再随并发完成顺序抖动。
 type NameArg struct {
+	Kind     Kind
 	ID       string
 	Name     string
 	Descr    string
 	Category string
+	Src      string
 }
 
+// tableSQL 把模板里的 {{t}} 换成实体表名。
+// 表名只可能来自 Kind.table() 的白名单映射，因此拼接是安全的。
+func tableSQL(tmpl, tbl string) string { return strings.ReplaceAll(tmpl, "{{t}}", tbl) }
+
+const putNamesSQL = `INSERT INTO {{t}}(lang,id,name,descr,category,has_name,updated_at)
+	VALUES(?,?,?,?,?,1,?)
+	ON CONFLICT(lang,id) DO UPDATE SET
+	  name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE {{t}}.name END,
+	  descr = CASE WHEN excluded.descr <> '' THEN excluded.descr ELSE {{t}}.descr END,
+	  category = CASE WHEN {{t}}.category = '' THEN excluded.category ELSE {{t}}.category END,
+	  has_name = 1,
+	  updated_at = excluded.updated_at`
+
 // PutNames 写入名称侧（来自 String.wz）。名称为空不覆盖已有名称。
+// 一个批次可以混装多个实体域，按 Kind 分流到各自的表。
 func (d *DB) PutNames(lang string, names []NameArg) (int, error) {
 	if len(names) == 0 {
 		return 0, nil
@@ -320,39 +444,51 @@ func (d *DB) PutNames(lang string, names []NameArg) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO item(lang,id,name,descr,category,has_name,updated_at)
-		VALUES(?,?,?,?,?,1,?)
-		ON CONFLICT(lang,id) DO UPDATE SET
-		  name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE item.name END,
-		  descr = CASE WHEN excluded.descr <> '' THEN excluded.descr ELSE item.descr END,
-		  category = CASE WHEN item.category = '' THEN excluded.category ELSE item.category END,
-		  has_name = 1,
-		  updated_at = excluded.updated_at`)
-	if err != nil {
-		return 0, err
-	}
-	defer stmt.Close()
+	stmts := map[string]*sql.Stmt{}
+	defer func() {
+		for _, s := range stmts {
+			s.Close()
+		}
+	}()
 	n := 0
 	for _, a := range names {
 		if strings.TrimSpace(a.Name) == "" {
 			continue
 		}
-		if _, err := stmt.Exec(lang, a.ID, a.Name, a.Descr, a.Category, time.Now().Unix()); err != nil {
-			return n, fmt.Errorf("写入名称 %s: %w", a.ID, err)
+		tbl := a.Kind.table()
+		st, ok := stmts[tbl]
+		if !ok {
+			if st, err = tx.PrepareContext(ctx, tableSQL(putNamesSQL, tbl)); err != nil {
+				return 0, err
+			}
+			stmts[tbl] = st
+		}
+		if _, err := st.Exec(lang, a.ID, a.Name, a.Descr, a.Category, time.Now().Unix()); err != nil {
+			return n, fmt.Errorf("写入名称 %s/%s: %w", tbl, a.ID, err)
 		}
 		n++
 	}
 	return n, tx.Commit()
 }
 
-// InfoArg 是属性侧的入库参数。
+// InfoArg 是属性侧的入库参数。Kind 为空按物品处理，Src 见 NameArg。
 type InfoArg struct {
+	Kind     Kind
 	ID       string
 	Category string
 	Info     map[string]string
+	Src      string
 }
 
-// PutInfos 写入属性侧（来自 Item.wz / Character.wz），按 key 合并已有 info。
+const putInfosSQL = `INSERT INTO {{t}}(lang,id,category,info,has_info,updated_at)
+			VALUES(?,?,?,?,1,?)
+			ON CONFLICT(lang,id) DO UPDATE SET
+			  info = excluded.info,
+			  category = CASE WHEN {{t}}.category = '' THEN excluded.category ELSE {{t}}.category END,
+			  has_info = 1,
+			  updated_at = excluded.updated_at`
+
+// PutInfos 写入属性侧（来自 Item.wz / Character.wz / Mob.wz / Npc.wz），按 key 合并已有 info。
 func (d *DB) PutInfos(lang string, infos []InfoArg) (int, error) {
 	if len(infos) == 0 {
 		return 0, nil
@@ -369,29 +505,25 @@ func (d *DB) PutInfos(lang string, infos []InfoArg) (int, error) {
 		if len(a.Info) == 0 {
 			continue
 		}
-		merged, err := mergeInfo(ctx, tx, lang, a.ID, a.Info)
+		tbl := a.Kind.table()
+		merged, err := mergeInfo(ctx, tx, tbl, lang, a.ID, a.Info)
 		if err != nil {
 			return n, err
 		}
-		_, err = tx.Exec(`INSERT INTO item(lang,id,category,info,has_info,updated_at)
-			VALUES(?,?,?,?,1,?)
-			ON CONFLICT(lang,id) DO UPDATE SET
-			  info = excluded.info,
-			  category = CASE WHEN item.category = '' THEN excluded.category ELSE item.category END,
-			  has_info = 1,
-			  updated_at = excluded.updated_at`,
+		_, err = tx.ExecContext(ctx, tableSQL(putInfosSQL, tbl),
 			lang, a.ID, a.Category, merged, time.Now().Unix())
 		if err != nil {
-			return n, fmt.Errorf("写入属性 %s: %w", a.ID, err)
+			return n, fmt.Errorf("写入属性 %s/%s: %w", tbl, a.ID, err)
 		}
 		n++
 	}
 	return n, tx.Commit()
 }
 
-func mergeInfo(ctx context.Context, tx *sql.Tx, lang, id string, add map[string]string) (string, error) {
+func mergeInfo(ctx context.Context, tx *sql.Tx, tbl, lang, id string, add map[string]string) (string, error) {
 	var cur sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT info FROM item WHERE lang = ? AND id = ?`, lang, id).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	q := tableSQL(`SELECT info FROM {{t}} WHERE lang = ? AND id = ?`, tbl)
+	if err := tx.QueryRowContext(ctx, q, lang, id).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
 	out := map[string]string{}
@@ -412,6 +544,7 @@ func mergeInfo(ctx context.Context, tx *sql.Tx, lang, id string, add map[string]
 
 // Query 是检索条件，零值表示不过滤。
 type Query struct {
+	Kind     Kind     // 实体域，空 = 物品
 	Lang     string   // 语言域，必填（空则用 DefaultLang 语义由调用方保证）
 	ID       string   // 精确 ID
 	IDPrefix string   // ID 前缀，兼容 7 位号段
@@ -436,7 +569,8 @@ func (d *DB) Search(q Query) ([]ItemRow, int, error) {
 	defer cancel()
 
 	where, args := q.clauses()
-	base := `FROM item ` + where
+	tbl := q.Kind.table()
+	base := `FROM ` + tbl + ` ` + where
 	var total int
 	if err := d.sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) `+base, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -456,7 +590,7 @@ func (d *DB) Search(q Query) ([]ItemRow, int, error) {
 		dir = "DESC"
 	}
 	rows, err := d.sqlDB.QueryContext(ctx,
-		`SELECT lang,id,name,descr,category,info,has_name,has_info,updated_at `+base+
+		`SELECT lang,id,name,descr,category,info,has_name,has_info,edited,updated_at `+base+
 			fmt.Sprintf(` ORDER BY %s %s LIMIT ? OFFSET ?`, orderBy, dir),
 		append(args, limit, q.Offset)...)
 	if err != nil {
@@ -465,7 +599,7 @@ func (d *DB) Search(q Query) ([]ItemRow, int, error) {
 	defer rows.Close()
 	out := make([]ItemRow, 0, limit)
 	for rows.Next() {
-		it, err := scanItem(rows)
+		it, err := scanItem(rows, q.Kind)
 		if err != nil {
 			return nil, total, err
 		}
@@ -474,14 +608,14 @@ func (d *DB) Search(q Query) ([]ItemRow, int, error) {
 	return out, total, rows.Err()
 }
 
-// Get 按语言 + ID 取单条。
-func (d *DB) Get(lang, id string) (ItemRow, bool, error) {
+// Get 按实体域 + 语言 + ID 取单条。入参 ID 与库内一致地做零填充归一。
+func (d *DB) Get(kind Kind, lang, id string) (ItemRow, bool, error) {
 	ctx, cancel := timeout()
 	defer cancel()
-	row := d.sqlDB.QueryRowContext(ctx,
-		`SELECT lang,id,name,descr,category,info,has_name,has_info,updated_at FROM item WHERE lang = ? AND id = ?`,
-		lang, id)
-	it, err := scanItem(row)
+	id = extract.NormalizeID(id)
+	q := tableSQL(`SELECT lang,id,name,descr,category,info,has_name,has_info,edited,updated_at FROM {{t}} WHERE lang = ? AND id = ?`, kind.table())
+	row := d.sqlDB.QueryRowContext(ctx, q, lang, id)
+	it, err := scanItem(row, kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ItemRow{}, false, nil
 	}
@@ -493,23 +627,25 @@ func (d *DB) Get(lang, id string) (ItemRow, bool, error) {
 
 type scanner interface{ Scan(dest ...any) error }
 
-func scanItem(s scanner) (ItemRow, error) {
+func scanItem(s scanner, kind Kind) (ItemRow, error) {
 	var (
 		it               ItemRow
 		info             string
 		hasName, hasInfo int
+		edited           int
 		upd              int64
 	)
-	err := s.Scan(&it.Lang, &it.ID, &it.Name, &it.Descr, &it.Category, &info, &hasName, &hasInfo, &upd)
+	err := s.Scan(&it.Lang, &it.ID, &it.Name, &it.Descr, &it.Category, &info, &hasName, &hasInfo, &edited, &upd)
 	if err != nil {
 		return ItemRow{}, err
 	}
-	it.HasName, it.HasInfo = hasName != 0, hasInfo != 0
+	it.Kind = kind
+	it.HasName, it.HasInfo, it.Edited = hasName != 0, hasInfo != 0, edited != 0
 	it.Updated = time.Unix(upd, 0)
 	it.Info = map[string]string{}
 	if info != "" {
 		if err := json.Unmarshal([]byte(info), &it.Info); err != nil {
-			return ItemRow{}, fmt.Errorf("物品 %s 的 info 不是合法 JSON: %w", it.ID, err)
+			return ItemRow{}, fmt.Errorf("%s %s 的 info 不是合法 JSON: %w", kind, it.ID, err)
 		}
 	}
 	return it, nil
@@ -517,6 +653,7 @@ func scanItem(s scanner) (ItemRow, error) {
 
 // Totals 是库内概况。字段带 json 标签，供内置查询页直接消费。
 type Totals struct {
+	Kind        Kind       `json:"kind,omitempty"`
 	Lang        string     `json:"lang"`
 	Items       int        `json:"items"`
 	Named       int        `json:"named"`
@@ -542,11 +679,13 @@ type LangCount struct {
 }
 
 // Langs 返回库里已有的语言域，按物品数降序。
-func (d *DB) Langs() ([]LangCount, error) {
+// Langs 返回某个实体域下已有的语言域，按条数降序。
+// 三个域的规模差一个量级（物品 5.6 万、NPC 7 千），所以下拉的计数必须跟着域走。
+func (d *DB) Langs(kind Kind) ([]LangCount, error) {
 	ctx, cancel := timeout()
 	defer cancel()
 	rows, err := d.sqlDB.QueryContext(ctx,
-		`SELECT lang, COUNT(*), COALESCE(SUM(has_name),0) FROM item GROUP BY lang ORDER BY COUNT(*) DESC`)
+		tableSQL(`SELECT lang, COUNT(*), COALESCE(SUM(has_name),0) FROM {{t}} GROUP BY lang ORDER BY COUNT(*) DESC`, kind.table()))
 	if err != nil {
 		return nil, err
 	}
@@ -562,15 +701,17 @@ func (d *DB) Langs() ([]LangCount, error) {
 	return out, rows.Err()
 }
 
-// Stats 汇总某一语言域的数据。
-func (d *DB) Stats(lang string) (Totals, error) {
+// Stats 汇总某一实体域 + 语言域的数据。文件计数是语言域级别的，与 kind 无关。
+func (d *DB) Stats(kind Kind, lang string) (Totals, error) {
 	ctx, cancel := timeout()
 	defer cancel()
+	tbl := kind.table()
 	var t Totals
 	t.Lang = lang
+	t.Kind = kind
 	if err := d.sqlDB.QueryRowContext(ctx,
-		`SELECT COUNT(*), COALESCE(SUM(has_name),0), COALESCE(SUM(has_info),0),
-		        COALESCE(SUM(has_name*has_info),0) FROM item WHERE lang = ?`, lang).
+		tableSQL(`SELECT COUNT(*), COALESCE(SUM(has_name),0), COALESCE(SUM(has_info),0),
+			        COALESCE(SUM(has_name*has_info),0) FROM {{t}} WHERE lang = ?`, tbl), lang).
 		Scan(&t.Items, &t.Named, &t.WithInfo, &t.Complete); err != nil {
 		return t, err
 	}
@@ -585,7 +726,7 @@ func (d *DB) Stats(lang string) (Totals, error) {
 		`SELECT MAX(started_at) FROM scan_run WHERE lang = ?`, lang).Scan(&last); err == nil && last.Valid {
 		t.LastRunUnix = last.Int64
 	}
-	cats, err := d.queryCats(ctx, lang, `SELECT COALESCE(NULLIF(category,''),'`+NoCategoryName+`') c, COUNT(*) FROM item WHERE lang = ? GROUP BY c ORDER BY COUNT(*) DESC LIMIT 12`)
+	cats, err := d.queryCats(ctx, lang, tableSQL(`SELECT COALESCE(NULLIF(category,''),'`+NoCategoryName+`') c, COUNT(*) FROM {{t}} WHERE lang = ? GROUP BY c ORDER BY COUNT(*) DESC LIMIT 12`, tbl))
 	if err != nil {
 		return t, err
 	}
@@ -593,11 +734,11 @@ func (d *DB) Stats(lang string) (Totals, error) {
 	return t, nil
 }
 
-// Categories 返回某语言域下的全部分类及物品数，按数量降序。
-func (d *DB) Categories(lang string) ([]CatCount, error) {
+// Categories 返回某实体域 + 语言域下的全部分类及条数，按数量降序。
+func (d *DB) Categories(kind Kind, lang string) ([]CatCount, error) {
 	ctx, cancel := timeout()
 	defer cancel()
-	return d.queryCats(ctx, lang, `SELECT COALESCE(NULLIF(category,''),'`+NoCategoryName+`') c, COUNT(*) FROM item WHERE lang = ? GROUP BY c ORDER BY COUNT(*) DESC`)
+	return d.queryCats(ctx, lang, tableSQL(`SELECT COALESCE(NULLIF(category,''),'`+NoCategoryName+`') c, COUNT(*) FROM {{t}} WHERE lang = ? GROUP BY c ORDER BY COUNT(*) DESC`, kind.table()))
 }
 
 // AttrCount 是一个属性键在该语言域内出现的物品数。
@@ -608,10 +749,11 @@ type AttrCount struct {
 
 // AttrKeys 统计库内实际出现的信息属性键，按覆盖面降序。
 // 用 json_each 展开 info，56k 行量级在百毫秒内；limit<=0 表示不限。
-func (d *DB) AttrKeys(lang string, limit int) ([]AttrCount, error) {
+func (d *DB) AttrKeys(kind Kind, lang string, limit int) ([]AttrCount, error) {
 	ctx, cancel := timeout()
 	defer cancel()
-	q := `SELECT j.key, COUNT(*) FROM item, json_each(item.info) j WHERE item.lang = ? GROUP BY j.key ORDER BY COUNT(*) DESC, j.key`
+	tbl := kind.table()
+	q := tableSQL(`SELECT j.key, COUNT(*) FROM {{t}}, json_each({{t}}.info) j WHERE {{t}}.lang = ? GROUP BY j.key ORDER BY COUNT(*) DESC, j.key`, tbl)
 	args := []any{lang}
 	if limit > 0 {
 		q += ` LIMIT ?`
@@ -673,19 +815,15 @@ func (d *DB) FinishRun(id int64, parsed, failed int) error {
 }
 
 // DeleteMissing 清理某语言域下磁盘已不存在的文件记录，返回删除数。
+// 记录里有 IDs 溯源时，会连带清掉这些文件独占的名称/属性（见 DeleteFiles）。
 func (d *DB) DeleteMissing(lang string, alive []string) (int, error) {
 	ctx, cancel := timeout()
 	defer cancel()
-	tx, err := d.sqlDB.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	have := map[string]bool{}
+	have := make(map[string]bool, len(alive))
 	for _, p := range alive {
 		have[p] = true
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT path FROM wz_file WHERE lang = ?`, lang)
+	rows, err := d.sqlDB.QueryContext(ctx, `SELECT path FROM wz_file WHERE lang = ?`, lang)
 	if err != nil {
 		return 0, err
 	}
@@ -701,12 +839,14 @@ func (d *DB) DeleteMissing(lang string, alive []string) (int, error) {
 		}
 	}
 	rows.Close()
-	for _, p := range gone {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM wz_file WHERE lang = ? AND path = ?`, lang, p); err != nil {
-			return 0, err
-		}
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
-	return len(gone), tx.Commit()
+	if len(gone) == 0 {
+		return 0, nil
+	}
+	n, _, err := d.DeleteFiles(lang, gone, true)
+	return n, err
 }
 
 // jsonPath 把 info 的 key 包成带引号的 JSON 路径。
@@ -724,7 +864,7 @@ func (q Query) clauses() (string, []any) {
 	}
 	add(`lang = ?`, q.Lang)
 	if q.ID != "" {
-		add(`id = ?`, q.ID)
+		add(`id = ?`, extract.NormalizeID(q.ID))
 	}
 	if q.IDPrefix != "" {
 		// 库里 ID 统一是 8 位零填充，用户手输的往往是原始 7 位号段前缀，

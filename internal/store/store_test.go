@@ -80,7 +80,7 @@ func TestSidesDoNotOverwriteEachOther(t *testing.T) {
 		t.Fatalf("PutNames en: %v", err)
 	}
 
-	it, ok, err := d.Get(lang, "01002000")
+	it, ok, err := d.Get(KindItem, lang, "01002000")
 	if err != nil || !ok {
 		t.Fatalf("Get: ok=%v err=%v", ok, err)
 	}
@@ -93,7 +93,7 @@ func TestSidesDoNotOverwriteEachOther(t *testing.T) {
 	if !it.HasName || !it.HasInfo {
 		t.Errorf("has_name/has_info 标记错: %+v", it)
 	}
-	en, ok, err := d.Get("en", "01002000")
+	en, ok, err := d.Get(KindItem, "en", "01002000")
 	if err != nil || !ok {
 		t.Fatalf("Get en: ok=%v err=%v", ok, err)
 	}
@@ -191,7 +191,7 @@ func TestStatsAndCategories(t *testing.T) {
 		t.Fatalf("FinishRun: %v", err)
 	}
 
-	st, err := d.Stats(lang)
+	st, err := d.Stats(KindItem, lang)
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestStatsAndCategories(t *testing.T) {
 		t.Errorf("分类统计错: %+v", st.Categories)
 	}
 
-	cats, err := d.Categories(lang)
+	cats, err := d.Categories(KindItem, lang)
 	if err != nil {
 		t.Fatalf("Categories: %v", err)
 	}
@@ -219,11 +219,11 @@ func TestStatsAndCategories(t *testing.T) {
 		t.Errorf("分类数期望 2，实际 %d", len(cats))
 	}
 	// 空语言域应什么都不返回。
-	empty, err := d.Stats("en")
+	empty, err := d.Stats(KindItem, "en")
 	if err != nil || empty.Items != 0 {
 		t.Errorf("en 域应为空: %+v err=%v", empty, err)
 	}
-	languages, err := d.Langs()
+	languages, err := d.Langs(KindItem)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestOpenMigratesLegacySchema(t *testing.T) {
 	}
 	defer d.Close()
 
-	it, ok, err := d.Get(LegacyLang, "04000000")
+	it, ok, err := d.Get(KindItem, LegacyLang, "04000000")
 	if err != nil || !ok {
 		t.Fatalf("迁移后查不到旧数据: ok=%v err=%v", ok, err)
 	}
@@ -295,7 +295,7 @@ func TestOpenMigratesLegacySchema(t *testing.T) {
 	if err != nil || len(p) != 0 {
 		t.Errorf("旧指纹未生效: %v err=%v", p, err)
 	}
-	st, err := d.Stats(LegacyLang)
+	st, err := d.Stats(KindItem, LegacyLang)
 	if err != nil || st.Items != 1 || st.Files != 1 {
 		t.Errorf("迁移后统计错: %+v err=%v", st, err)
 	}
@@ -305,7 +305,7 @@ func TestOpenMigratesLegacySchema(t *testing.T) {
 		t.Fatalf("二次 Open 失败: %v", err)
 	}
 	defer again.Close()
-	if _, ok, err := again.Get(LegacyLang, "04000000"); !ok || err != nil {
+	if _, ok, err := again.Get(KindItem, LegacyLang, "04000000"); !ok || err != nil {
 		t.Errorf("二次打开数据丢失: ok=%v err=%v", ok, err)
 	}
 }
@@ -326,7 +326,7 @@ func TestUncategorizedAndAttrKeys(t *testing.T) {
 	}
 
 	// 分类为空时统计里显示成 NoCategoryName，检索要能反向命中。
-	cats, err := d.Categories(lang)
+	cats, err := d.Categories(KindItem, lang)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestUncategorizedAndAttrKeys(t *testing.T) {
 	}
 
 	// 属性键频次统计按覆盖面降序，且只统计本语言域。
-	ks, err := d.AttrKeys(lang, 0)
+	ks, err := d.AttrKeys(KindItem, lang, 0)
 	if err != nil {
 		t.Fatalf("AttrKeys: %v", err)
 	}
@@ -356,11 +356,11 @@ func TestUncategorizedAndAttrKeys(t *testing.T) {
 	if ks[1].Key != "price" || ks[1].Count != 1 {
 		t.Errorf("属性键排序错: %+v", ks)
 	}
-	lim, err := d.AttrKeys(lang, 1)
+	lim, err := d.AttrKeys(KindItem, lang, 1)
 	if err != nil || len(lim) != 1 {
 		t.Errorf("AttrKeys limit 未生效: %+v err=%v", lim, err)
 	}
-	other, err := d.AttrKeys("en", 0)
+	other, err := d.AttrKeys(KindItem, "en", 0)
 	if err != nil || len(other) != 0 {
 		t.Errorf("en 域不该有属性键: %+v", other)
 	}

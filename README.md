@@ -1,22 +1,25 @@
 # WzItemArchive（MapleWzMeta / mia）
 
-把冒险岛 WZ 的**导出 XML** 解析、按物品 ID 关联、落到 SQLite，然后用命令行或内置网页检索。
+把冒险岛 WZ 的**导出 XML** 解析、按实体 ID 关联、落到 SQLite，然后用命令行或内置网页检索。
+覆盖**物品 / NPC / 怪物 / 技能 / 变身 / 反应堆六个实体域**，六域共用同一条解析管线、各入一张同构表。
 
 数据链路：
 
 ```
 wz/ 导出的 img XML
-  ├─ String.wz   →  8 位物品 ID → 名称 / 描述 / 分类
-  └─ Item.wz、Character.wz  →  8 位物品 ID → 属性（info 扁平化为 JSON）
-                    ↓  以 NormalizeID 后的 8 位零填充 ID 为主键、按 lang 分域
-              data/mia.db（SQLite）
+  ├─ String.wz        →  8 位实体 ID → 名称 / 描述 / 分类（表名白名单定域：物品·NPC·怪物·技能）
+  ├─ Item.wz、Character.wz  →  物品属性（info 扁平化为 JSON）
+  ├─ Mob.wz、Npc.wz         →  怪物 / NPC 属性
+  └─ Skill.wz、Morph.wz、Reactor.wz  →  技能 / 变身 / 反应堆属性
+                    ↓  以 NormalizeID 后的 8 位零填充 ID 为主键、按 (lang, 实体域) 分域
+        data/mia.db（SQLite：item / npc / mob / skill / morph / reactor 六张同构表 + wz_file / scan_run）
                     ↓
         CLI（query / stats）  +  HTTP 服务（内置单页检索）
 ```
 
-图标另走一路，**不落库**：`imgdata/`（由 [wzimgget](https://github.com/sqx6781268/wzimgget) 从客户端 `Data` 的独立 `.img` 提取）→ `serve` 启动时按 8 位零填充 ID 建内存索引 → `/img/<id>.png`。
+图标另走一路，**不落库、且按实体域取用**：`imgdata/`（由 [wzimgget](https://github.com/sqx6781268/wzimgget) 从客户端 `Data` 的独立 `.img` 提取）→ `serve` 启动时按 `(域, 8 位零填充 ID)` 建内存索引 → `/img/<id>.png?for=<kind>`（物品域只认 `{Item, Character}` 目录，不会拿到 NPC 立绘）。
 
-当前本机基线：`zh-CN` 域 56,264 条物品、45,592 个已扫文件、解析失败 0，图标 28,307 个可用 ID。
+当前本机基线：`zh-CN` 物品 52,558 / NPC 7,474 / 怪物 2,532 / 技能 544 / 变身 71 / 反应堆 462，图标 36,646 个可用 ID。分域细则见 [docs/11-NPC与怪物解析.md](docs/11-NPC与怪物解析.md) 与 [docs/09](docs/09-验证基线与已知缺陷.md) §2。
 
 > **仓库内容范围**：本仓库只开源**代码与文档**。`wz/`、`imgdata/`、`scripts*/` 等目录是冒险岛客户端的导出内容与素材，版权归 Nexon 及其权利人所有，**不随本仓库分发**，也不在 `.gitignore` 的收录范围内。使用者需自行准备导出数据，详见第 3 节。
 
@@ -81,7 +84,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/maplewzmeta ./cmd/maplewzm
       "lang": "zh-CN",
       "label": "简体中文",
       "wz": "wz",
-      "sources": ["String.wz", "Item.wz", "Character.wz"]
+      "sources": ["String.wz", "Item.wz", "Character.wz", "Mob.wz", "Npc.wz"]
     }
   ]
 }
@@ -103,13 +106,21 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/maplewzmeta ./cmd/maplewzm
 
 增量判据是文件的 `size + mtime`：首次全量约 38s，**重跑同一份导出应输出「跳过未变 = 磁盘文件数、解析 0、用时 0s」**。
 
+```bash
+./bin/maplewzmeta.exe scan -force              # 忽略指纹全部重解（补齐文件级溯源）
+./bin/maplewzmeta.exe scan -overwrite          # 以文件为准覆盖：info 整包替换 + 清掉失效贡献
+```
+
+两个开关互相独立：`-force` 管"要不要重解"，`-overwrite` 管"落库时覆盖还是累积"。
+命令行**始终保护**管理页手工改过的行（`item.edited=1`）。
+
 ### 查看概况
 
 ```bash
 ./bin/maplewzmeta.exe stats
 ```
 
-先打印图标索引规模（或"未启用"），再逐语言打印物品数 / 有名称 / 有属性 / 齐全 / 文件数 / 分类 Top。
+先打印图标索引规模（或"未启用"），再逐语言打印规模：每个语言下**分六个实体域各一行**，各行的条数 / 有名称 / 有属性 / 齐全占比，末尾的文件数是语言域级别的合计。
 
 ### 命令行检索
 
@@ -118,32 +129,36 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/maplewzmeta ./cmd/maplewzm
 ./bin/maplewzmeta.exe query -prefix 0100 -cat Cap -complete
 ./bin/maplewzmeta.exe query -attr cash=1 -json      # 机器可读输出
 ./bin/maplewzmeta.exe query -unnamed                # 查导出缺口（缺名称的条目）
+./bin/maplewzmeta.exe query -kind mob -q 僵尸蘑菇   # 检索怪物域（-kind item|npc|mob，缺省 item）
 ```
 
 ### 起服务（日常主要用法）
 
 ```bash
 ./bin/maplewzmeta.exe serve
-# 00:20:46 图标索引：28503 个文件，28307 个可用 ID
+# 00:20:46 图标索引：28503 个文件，28307 个可用 ID（按域：item=…，npc=…，mob=…）
 # 00:20:46 查询服务已启动：http://127.0.0.1:8080 （语言：zh-CN，图标：开）
 ```
 
 浏览器打开 <http://127.0.0.1:8080>：
 
+- **顶栏「实体」下拉**切换物品 / NPC / 怪物 / 技能 / 变身 / 反应堆六域，切域会重拉 meta、统计与检索；非物品域下左侧分类块自动隐藏（这些域一文件一实体、没有分类目录）；
+- **顶栏右上角「夜晚 / 白天」按钮**切换暗色配色（配色只改 CSS 变量，选择记在 `localStorage`，检索页与管理页共用同一个键、互相同步；首屏在 `<head>` 里提前套用，不会闪白）；
 - **左侧筛选栏**：分类（中文说明 + 条数，如 `武器（Weapon） 6131`，可搜索）、数据完整度、属性条件构建器、排序；
-- **属性条件**可任意增删，运算符支持 `等于 / 包含 / ≥ / ≤ / 存在`，条件之间取「且」；属性键既能从下拉里选（库内真实存在的 307 个键，93 个带中文名），也能手输未收录的键；
-- **结果表格**行点击 → 右上角弹出详情浮层，× / 遮罩 / Esc 关闭；
-- 顶栏可切换语言域。
+- **属性条件**可任意增删，运算符支持 `等于 / 包含 / ≥ / ≤ / 存在`，条件之间取「且」；属性键既能从下拉里选（按当前域列出的真实键，带中文名的做成常用按钮），也能手输未收录的键；
+- **结果表格**行点击 → 右上角弹出详情浮层，× / 遮罩 / Esc 关闭；浮层底部标明这条数据的**名称来自哪个 `String.wz` 表、属性来自哪个文件**，改完 XML 就知道该重载谁；
+- 表格区是一张固定高度的卡片：**内部滚动、表头吸顶、分页条钉在卡片底部**（翻页不用把页面滚到底），分页条最左是页码 `1 … 当前页前后各 5 页 … 末页`；关键属性摘要限宽可换行、**最多 3 行**，超出截断为「…另 N 项」；
+- 顶栏可切换语言域；**顶栏右侧「管理页」入口**直达 `/admin`（`admin.enabled=false` 时自动隐藏）。
 
-HTTP 接口全部只读 `GET`，可直接对接自己的脚本：
+HTTP 接口全部只读 `GET`，检索端点都带 `kind`（缺省即物品域），可直接对接自己的脚本：
 
 | 端点 | 用途 |
 |---|---|
-| `/api/items` | 列表检索，参数 `lang,q,id,cat,attr,like,min,max,has,complete,order,desc,limit,offset` |
+| `/api/items` | 列表检索，参数 `kind,lang,q,id,cat,attr,like,min,max,has,complete,order,desc,limit,offset` |
 | `/api/item?id=01000000` | 单条详情 |
-| `/api/meta` | 侧边栏字典：分类与属性键的中文名、数量、是否预设 |
+| `/api/meta` | 侧边栏字典：分类与属性键的中文名、数量、是否预设（属性说明按域分表） |
 | `/api/stats`、`/api/categories`、`/api/langs` | 概况、分类计数、语言清单 |
-| `/img/<id>.png` | 图标（仅 `icons.enabled` 时注册） |
+| `/img/<id>.png?for=<kind>` | 图标（仅 `icons.enabled` 时注册；`for` 缺省即物品域） |
 
 ```bash
 curl -s "http://127.0.0.1:8080/api/items?lang=zh-CN&cat=Weapon&min=reqLevel=100&max=reqLevel=150"
@@ -152,6 +167,23 @@ curl -s "http://127.0.0.1:8080/api/items?lang=zh-CN&attr=cash=1&like=islot=wp&li
 
 参数细则、前端行为与故障对照见 [docs/08-命令行与查询接口.md](docs/08-命令行与查询接口.md)。
 
+### 管理页（XML 变了以后同步数据库）
+
+浏览器打开 <http://127.0.0.1:8080/admin>（或点首页右上角「管理页」），四个标签页：
+
+| 标签页 | 做什么 |
+|---|---|
+| **比对与重载** | 只读比对磁盘指纹与库内指纹，列出 `新增 / 变更 / 已删除`；勾选文件 → 重新解析并**以文件为准覆盖**（`info` 整包替换、XML 里删掉的字段和条目在库里同步消失）；也可按状态批量重载或全库强制重扫。手工行统计显示物品/NPC/怪物**分域明细** |
+| **文件记录** | 分页看 `wz_file`（大小、修改时间、贡献条目数、**文件级溯源 ID 数**），单行强制重载 |
+| **实体修正** | 顶栏切换实体域，检索并手工改名称/描述/分类/属性 JSON，可删除；改过的行打「手工」标记，**默认不受重载覆盖**（保护按域生效） |
+| **扫描历史** | 每次扫描/重载的耗时与成败 |
+
+安全闸门：`wzconfig.json` 的 `admin.token` 非空时所有写接口查 `X-Admin-Token` 头；
+留空则**只放行本机回环地址**。把 `addr` 绑到局域网前务必先设口令。`admin.enabled=false` 可整体关闭。
+
+> 旧库第一次用要先跑一次「全库强制重扫」：`wz_file.ids`（文件级溯源）补齐之后，
+> 逐文件重载才能清掉该文件不再贡献的历史数据。
+
 ## 5. 仓库结构
 
 ```
@@ -159,12 +191,12 @@ cmd/maplewzmeta/   CLI 入口（scan / query / stats / serve）
 cmd/wzstats/       验证工具：全量解析但不落库，看规模与耗时
 cmd/wzbind/        验证工具：名称+属性关联覆盖率
 internal/wzxml/    img XML 解码（含 uol 相对路径打平、脏编码兜底）
-internal/extract/  按源类型抽取元数据、ID 归一
-internal/scan/     增量扫描 + 并发调度 + 批量落库
-internal/store/    SQLite 表结构、upsert 合并语义、检索构造、旧库迁移
+internal/extract/  按源类型抽取元数据、ID 归一、按表名白名单/包名判定实体域（物品·NPC·怪物）
+internal/scan/     增量扫描 + 并发调度 + 定序落库（落库前按 (ID,来源) 排序）
+internal/store/    SQLite 三张同构实体表 + 文件指纹、upsert 合并语义、kind 前缀溯源、检索构造、旧库迁移
 internal/config/   wzconfig.json 解析与路径基准
-internal/icons/    imgdata 图标索引与 HTTP 服务
-internal/web/      HTTP 接口、中文别名字典、内嵌查询页
+internal/icons/    imgdata 图标索引与 HTTP 服务（按实体域取用）
+internal/web/      HTTP 接口（带 kind）、分域中文别名字典、内嵌查询页
 docs/              中文说明文档（规则、实现路径、实测基线、已知缺陷）
 wzconfig.json      运行配置（仓库提供）
 wz/  imgdata/  data/  scripts*/  数据集、图标、客户端脚本、数据库
@@ -178,7 +210,8 @@ wz/  imgdata/  data/  scripts*/  数据集、图标、客户端脚本、数据�
 - 架构与并发模型 → 01；数据集布局 → 02；XML 结构与坑 → 03；
 - 物品 ID 归一与关联 → 04；装备槽 `islot` 与号段 → 05；存储与检索构造 → 06；
 - 配置字段 → 07；CLI/HTTP/页面 → 08；**测试基线、实测数字与已知缺陷** → 09；
-  **图标提取联动（wzimgget）** → 10（交接格式、一次跑通步骤、图标缺口对账）。
+  **图标提取联动（wzimgget）** → 10（交接格式、一次跑通步骤、图标缺口对账）；
+  **NPC 与怪物解析** → 11（这两个域的命名/属性来源、ID 位数与归一、跨域重叠与分表结论、常用属性键）。
 - 附录：**WZ 导出 XML 分类清单**（可复现的计数底稿）、
   **实体与 String.wz 的关联**（20 张文本表各自属于哪个实体域、ID 位数形态、实测关联率与跨实体引用链）。
 
@@ -191,9 +224,12 @@ wz/  imgdata/  data/  scripts*/  数据集、图标、客户端脚本、数据�
 | `bind: Only one usage of each socket address` | 8080 上有旧实例。`netstat -ano \| grep :8080` 取 PID 停掉，或 `serve -addr 127.0.0.1:8081` 换端口 |
 | 改了页面没反应 | 前端是 `go:embed`，必须重新 `go build` 并重启 `serve` |
 | 页面全是碎图 | `icons.dir` 指错目录；启动日志的图标索引数为 0 即目录不对 |
+| 想用 zip 分发图标 | `icons.dir` 直接写 `imgdata.zip`（Store 打包最快），重启 `serve`；索引只在启动时建，改包不会自动生效 |
 | 某语言条目为 0 | 该 locale 的 `sources` 没覆盖到含物品 ID 的包，或 `wz` 目录指错 |
 | 条件叠加返回 0 | 先分别确认两个集合都非空再看交集。例如 `cash=1` 的物品 `reqLevel` 恒为 0，与 `reqLevel≥120` 组合必然 0 命中，这是数据事实 |
 | 相对路径找不到文件 | 配置里的相对路径按**配置文件所在目录**解析；`-db` 覆盖项按**进程工作目录**解析，两者基准不同 |
+| 管理页报 401 / 403 | 401 是 `admin.token` 非空但页面口令没填对（顶部重填）；403 是口令留空却从非回环地址访问，设口令或用 `127.0.0.1` 打开 |
+| 重载后库里旧字段还在 | 该语言域还没补齐文件级溯源，先跑一次「全库强制重扫」；或该行有手工标记被保护了，勾「同时覆盖手工修改过的行」 |
 
 ## 8. 许可证
 

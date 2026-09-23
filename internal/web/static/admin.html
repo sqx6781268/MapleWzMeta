@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WzItemArchive · 数据管理</title>
+<script>
+// 与检索页同一套主题键，首屏提前套用，暗色下不闪白。
+try { const t = localStorage.getItem('miaTheme'); if (t) document.documentElement.dataset.theme = t; } catch (_) {}
+</script>
+<style>
+  /* 主题：浅色口径在 :root，暗色只覆盖同名变量；切换按钮在页头右上角。 */
+  :root {
+    --bg:#f6f7f9; --fg:#20232a; --mut:#6b7280; --bd:#e3e6ea; --acc:#2563eb;
+    --card:#fff; --th:#fafbfc; --hover:#f0f6ff; --softfg:#374151; --focus:#bfdbfe; --bar:#eef0f3;
+    --ok:#047857; --okbg:#ecfdf5; --warn:#b45309; --warnbg:#fffbeb;
+    --bad:#b91c1c; --badbg:#fef2f2; --badbd:#fecaca; --tagbg:#eef2ff; --tagfg:#3730a3;
+  }
+  html[data-theme="dark"] {
+    --bg:#14161a; --fg:#e6e8ea; --mut:#9aa3ad; --bd:#2f343b; --acc:#5b9bff;
+    --card:#1b1e23; --th:#22262c; --hover:#232a35; --softfg:#c3c9d1; --focus:#2b4a72; --bar:#2a2f36;
+    --ok:#4ade80; --okbg:#12301f; --warn:#fbbf24; --warnbg:#332511;
+    --bad:#ff8f85; --badbg:#331a18; --badbd:#5b2b28; --tagbg:#26304a; --tagfg:#a8b8ff;
+  }
+  * { box-sizing: border-box; }
+  /* 管理页会频繁动态重绘表格（比对/查询/任务轮询），Chromium 的滚动锚定会补偿 scrollY，
+     偶发导致滚不动或回弹、reload 才恢复；关闭整页锚定消除该现象。 */
+  html { overflow-anchor: none; }
+  body { margin:0; font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; color:var(--fg); background:var(--bg); }
+  header { background:var(--card); border-bottom:1px solid var(--bd); padding:12px 20px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; position:sticky; top:0; z-index:20; }
+  header h1 { font-size:17px; margin:0; }
+  header .stat { color:var(--mut); font-size:12px; flex:1 1 320px; }
+  header a { color:var(--acc); font-size:12px; }
+  .wrap { max-width:1280px; margin:14px auto 48px; padding:0 16px; }
+  .tabs { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+  .tabs button { font:inherit; padding:6px 12px; border:1px solid var(--bd); border-radius:6px; background:var(--card); color:var(--mut); cursor:pointer; }
+  .tabs button.on { background:var(--acc); color:#fff; border-color:var(--acc); }
+  .card { background:var(--card); border:1px solid var(--bd); border-radius:8px; padding:12px; margin-bottom:12px; }
+  .card h2 { font-size:14px; margin:0 0 10px; }
+  .row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:10px; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--mut); }
+  input,select,textarea,button.act { font:inherit; padding:6px 9px; border:1px solid var(--bd); border-radius:6px; background:var(--card); color:var(--fg); }
+  input:focus,select:focus,textarea:focus { outline:2px solid var(--focus); border-color:var(--acc); }
+  button.act { cursor:pointer; background:var(--acc); color:#fff; border-color:var(--acc); }
+  button.act.ghost { background:var(--card); color:var(--fg); border-color:var(--bd); }
+  button.act.danger { background:var(--card); color:var(--bad); border-color:var(--badbd); }
+  button.act:disabled { opacity:.5; cursor:not-allowed; }
+  button.mini { font:inherit; font-size:12px; padding:2px 7px; border:1px solid var(--bd); border-radius:5px; background:var(--card); color:var(--mut); cursor:pointer; }
+  table { width:100%; border-collapse:collapse; background:var(--card); font-size:13px; }
+  th,td { padding:6px 8px; border-bottom:1px solid var(--bd); text-align:left; vertical-align:middle; }
+  th { font-size:12px; color:var(--mut); font-weight:600; background:var(--th); position:sticky; top:0; }
+  tbody tr:hover { background:var(--hover); }
+  td.path { font-family:Consolas,monospace; word-break:break-all; }
+  td.num { font-family:Consolas,monospace; text-align:right; white-space:nowrap; color:var(--mut); }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+  .chip { font-size:12px; padding:2px 9px; border-radius:10px; background:var(--tagbg); color:var(--tagfg); }
+  .chip.new { background:var(--okbg); color:var(--ok); }
+  .chip.changed { background:var(--card)beb; color:var(--warn); }
+  .chip.gone { background:var(--badbg); color:var(--bad); }
+  .chip.warn { background:var(--badbg); color:var(--bad); }
+  .pager { display:flex; gap:10px; align-items:center; justify-content:flex-end; margin-top:10px; color:var(--mut); font-size:12px; }
+  .empty { padding:22px; text-align:center; color:var(--mut); }
+  .bar { height:8px; border-radius:5px; background:var(--bar); overflow:hidden; margin:6px 0; }
+  .bar i { display:block; height:100%; background:var(--acc); width:0; }
+  #job pre { margin:6px 0 0; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; word-break:break-all; color:var(--softfg); }
+  form.edit { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  form.edit textarea { grid-column:1 / 4; min-height:190px; font:12px/1.5 Consolas,monospace; }
+  form.edit .full { grid-column:1 / 4; }
+  .hint { font-size:12px; color:var(--mut); }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  @media (max-width: 780px) { form.edit { grid-template-columns:1fr; } form.edit textarea,form.edit .full { grid-column:1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>WzItemArchive 数据管理</h1>
+  <label>语言<select id="lang" style="min-width:120px"></select></label>
+  <label>实体<select id="kind" style="min-width:96px">
+    <option value="item">物品</option>
+    <option value="npc">NPC</option>
+    <option value="mob">怪物</option>
+    <option value="skill">技能</option>
+    <option value="morph">变身</option>
+    <option value="reactor">反应堆</option>
+  </select></label>
+  <label>管理口令<input id="token" type="password" autocomplete="new-password" spellcheck="false" placeholder="admin.token，本机可留空" style="width:150px"></label>
+  <div class="stat" id="stat">未比对</div>
+  <a href="/">← 返回检索页</a>
+  <button class="act ghost" id="themeBtn" title="切换白天 / 夜晚配色">夜晚</button>
+</header>
+
+<div class="wrap">
+  <div class="tabs" id="tabs">
+    <button data-t="diff" class="on">比对与重载</button>
+    <button data-t="files">文件记录</button>
+    <button data-t="items">物品修正</button>
+    <button data-t="runs">扫描历史</button>
+  </div>
+
+  <section id="p-diff">
+    <div class="card">
+      <h2>XML 导出目录 ↔ 库内记录</h2>
+      <div class="row">
+        <button class="act" id="btn-diff">重新比对</button>
+        <label>明细状态<select id="diff-state">
+          <option value="">仅异常（新增/变更/已删除）</option>
+          <option value="new">新增</option>
+          <option value="changed">变更</option>
+          <option value="gone">已删除</option>
+          <option value="unchanged">未变</option>
+        </select></label>
+        <span class="hint" id="diff-hint">比对只读磁盘指纹与库内指纹，不解析内容。</span>
+      </div>
+      <div class="chips" id="diff-chips"></div>
+      <div class="row">
+        <button class="act" id="btn-reload-sel">重载勾选</button>
+        <button class="act ghost" id="btn-reload-changed">重载新增+变更</button>
+        <button class="act ghost" id="btn-reload-all">全库强制重扫</button>
+        <button class="act danger" id="btn-prune">清理已删除文件</button>
+        <label class="hint" style="flex-direction:row;align-items:center;gap:5px">
+          <input type="checkbox" id="force-edited" style="width:auto">同时覆盖手工修改过的行
+        </label>
+      </div>
+      <div id="diff-table"></div>
+    </div>
+  </section>
+
+  <section id="p-files" hidden>
+    <div class="card">
+      <h2>库内文件记录（wz_file）</h2>
+      <div class="row">
+        <label>路径包含<input id="f-q" style="width:260px" placeholder="Character.wz/Cap"></label>
+        <label>状态<select id="f-status"><option value="">全部</option><option value="ok">ok</option><option value="failed">failed</option></select></label>
+        <button class="act" id="btn-files">查询</button>
+        <span class="hint">「强制重载」按文件为准覆盖：名称直接替换、info 整包替换，并清掉该文件不再贡献的 ID。</span>
+      </div>
+      <div id="files-table"></div>
+    </div>
+  </section>
+
+  <section id="p-items" hidden>
+    <div class="card">
+      <h2>记录检索</h2>
+      <div class="row">
+        <label>ID / 关键字<input id="i-q" style="width:180px" placeholder="01002000 或 药水"></label>
+        <label>分类<input id="i-cat" style="width:140px" placeholder="Cap"></label>
+        <button class="act" id="btn-items">查询</button>
+        <span class="hint" id="items-hint"></span>
+      </div>
+      <div id="items-table"></div>
+    </div>
+    <div class="card" id="editor" hidden>
+      <h2 id="ed-title">编辑物品</h2>
+      <form class="edit" id="ed-form" onsubmit="return false">
+        <label>名称<input id="ed-name"></label>
+        <label>分类<input id="ed-cat"></label>
+        <label>最近更新<input id="ed-upd" readonly></label>
+        <label class="full">描述<textarea id="ed-descr" style="min-height:64px"></textarea></label>
+        <label class="full">属性 info（JSON，键为属性名）<textarea id="ed-info" spellcheck="false"></textarea></label>
+        <label class="full hint" style="flex-direction:row;align-items:center;gap:5px">
+          <input type="checkbox" id="ed-edited" style="width:auto">标记为手工修改（重载时默认跳过本行）
+        </label>
+        <div class="full row" style="margin:0">
+          <button class="act" id="btn-save">保存</button>
+          <button class="act ghost" id="btn-reparse">只重解析这一行所属文件</button>
+          <button class="act danger" id="btn-del">删除该行</button>
+          <span class="hint" id="ed-hint"></span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section id="p-runs" hidden>
+    <div class="card">
+      <h2>扫描与重载历史（scan_run）</h2>
+      <div class="row"><button class="act" id="btn-runs">刷新</button></div>
+      <div id="runs-table"></div>
+    </div>
+  </section>
+
+  <div class="card" id="job" hidden>
+    <h2>当前任务</h2>
+    <div class="bar"><i id="job-bar"></i></div>
+    <div id="job-text" class="hint"></div>
+    <pre id="job-log"></pre>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+
+/* 白天 / 夜晚配色：与检索页共用 miaTheme 键，两个页面互相同步。 */
+const THEME_KEY = 'miaTheme';
+function applyTheme(t) {
+  if (t) document.documentElement.dataset.theme = t;
+  $('#themeBtn').textContent = document.documentElement.dataset.theme === 'dark' ? '白天' : '夜晚';
+}
+$('#themeBtn').onclick = () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+  applyTheme(next);
+};
+applyTheme(document.documentElement.dataset.theme || '');
+const langSel = $('#lang');
+const kindSel = $('#kind');
+let langs = [], diffRows = [], filesPage = {limit:50, offset:0}, itemRows = [], cur = null, jobTimer = 0;
+
+function curKind() { return kindSel.value || 'item'; }
+function kindName(kind) { return kind === 'npc' ? 'NPC' : (kind === 'mob' ? '怪物' : '物品'); }
+// 危险操作两段式确认：原生 confirm/alert 会卡住自动化通道，这里改成"再点一次"并配倒计时复位。
+function twoStep(btn, tip, run) {
+  if (btn.dataset.armed === '1') {
+    btn.dataset.armed = ''; btn.textContent = btn.dataset.orig; run(); return;
+  }
+  btn.dataset.orig = btn.textContent; btn.dataset.armed = '1'; btn.textContent = tip;
+  setTimeout(() => { if (btn.dataset.armed === '1') { btn.dataset.armed = ''; btn.textContent = btn.dataset.orig; } }, 6000);
+}
+
+function token() {
+  const el = $('#token');
+  // 浏览器密码管理器会自作主张清空口令框，空值时回填上次存的值再发请求。
+  if (!el.value) el.value = localStorage.getItem('miaAdminToken') || '';
+  return el.value.trim();
+}
+// 口令随输随存：切标签页会重新发请求，只监听 change 时容易拿到旧值。
+$('#token').addEventListener('input', e => localStorage.setItem('miaAdminToken', e.target.value.trim()));
+
+async function api(path, opt = {}) {
+  opt.headers = Object.assign({'Content-Type': 'application/json', 'X-Admin-Token': token()}, opt.headers || {});
+  const r = await fetch(path, opt);
+  const text = await r.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch (_) { body = {raw: text}; }
+  if (!r.ok) throw new Error((body && (body.error || body.raw)) || (r.status + ' ' + r.statusText));
+  return body;
+}
+// 读接口（/api/items 等）不走管理闸门，错误文本是纯文本，单独兜一层。
+async function read(path) {
+  const r = await fetch(path);
+  const text = await r.text();
+  if (!r.ok) throw new Error(text || (r.status + ' ' + r.statusText));
+  return JSON.parse(text);
+}
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmtSize(n) { return n >= 1048576 ? (n/1048576).toFixed(1)+' MB' : (n >= 1024 ? (n/1024).toFixed(1)+' KB' : n+' B'); }
+function fmtTime(s) { if (!s) return ''; const d = new Date(s); return isNaN(d) ? '' : d.toLocaleString('zh-CN', {hour12:false}); }
+function say(msg, cls) { const el = $('#stat'); el.textContent = msg; el.className = 'stat ' + (cls || ''); }
+function table(cols, rows, empty) {
+  if (!rows.length) return '<div class="empty">' + esc(empty || '没有记录') + '</div>';
+  const head = '<thead><tr>' + cols.map(c => '<th>' + c[0] + '</th>').join('') + '</tr></thead>';
+  const body = '<tbody>' + rows.map(r => '<tr>' + cols.map(c => {
+    const v = c[2](r);
+    return '<td' + (c[3] ? ' class="' + c[3] + '"' : '') + '>' + (v == null ? '' : v) + '</td>';
+  }).join('') + '</tr>').join('') + '</tbody>';
+  return '<table>' + head + body + '</table>';
+}
+function q(name) { return encodeURIComponent(langSel.value || name || ''); }
+
+async function boot() {
+  $('#token').value = localStorage.getItem('miaAdminToken') || '';
+  const d = await read('/api/langs');
+  langs = d.langs;
+  langSel.innerHTML = langs.map(l => `<option value="${esc(l.lang)}">${esc(l.label)}（${l.items}）</option>`).join('');
+  langSel.value = d.default || (langs[0] && langs[0].lang);
+  langSel.onchange = () => { $('#diff-chips').innerHTML = ''; $('#diff-table').innerHTML = ''; doDiff(); };
+  await doDiff();
+  pollJob(true);
+}
+
+/* ---------- 比对与重载 ---------- */
+async function doDiff() {
+  say('正在比对 ' + langSel.value + ' …');
+  const st = $('#diff-state').value;
+  try {
+    const d = await api(`/api/admin/diff?lang=${q()}&state=${st}&limit=500`);
+    diffRows = d.rows || [];
+    const ebk = d.editedByKind || {};
+    $('#diff-chips').innerHTML =
+      chip('磁盘 ' + d.diskFiles + ' / 库内 ' + d.storedFiles) +
+      chip('新增 ' + d.new, 'new') + chip('变更 ' + d.changed, 'changed') +
+      chip('已删除 ' + d.gone, 'gone') + chip('未变 ' + d.unchanged) +
+      chip('手工修改 ' + d.editedRows + ' 行（物品 ' + (ebk.item || 0) +
+           ' / NPC ' + (ebk.npc || 0) + ' / 怪物 ' + (ebk.mob || 0) + '）') +
+      (d.provenance ? '' : chip('该语言域还没有文件级溯源：重载只能覆盖字段，清不掉历史贡献。先跑一次全库强制重扫。', 'warn'));
+    $('#diff-hint').textContent = `用时 ${d.tookMs} ms · ${d.wz}（源：${(d.sources||[]).join('、')}）`;
+    renderDiff();
+    say(`比对完成：新增 ${d.new}、变更 ${d.changed}、已删除 ${d.gone}`, d.new + d.changed + d.gone ? 'warn' : '');
+  } catch (e) { say('比对失败：' + e.message, 'bad'); }
+}
+function chip(t, cls) { return `<span class="chip ${cls || ''}">${esc(t)}</span>`; }
+function renderDiff() {
+  const cols = [
+    ['选择', '', r => `<input type="checkbox" class="dsel" value="${esc(r.path)}" ${r.state === 'gone' ? '' : 'checked'}>`, ''],
+    ['状态', '', r => `<span class="${r.state === 'gone' ? 'bad' : r.state === 'changed' ? 'warn' : 'ok'}">${r.state}</span>`, ''],
+    ['路径', '', r => esc(r.path), 'path'],
+    ['侧', '', r => r.side === 'name' ? '名称' : '属性', ''],
+    ['磁盘', '', r => r.diskSize ? fmtSize(r.diskSize) + '<br>' + esc(fmtTime(r.diskMtime)) : '-', 'num'],
+    ['库内', '', r => (r.dbSize ? fmtSize(r.dbSize) + '<br>' + esc(fmtTime(r.dbMtime)) : '<span class="bad">无记录</span>'), 'num'],
+    ['条目 / 溯源', '', r => r.dbRows + ' / ' + r.dbIds, 'num'],
+    ['上次', '', r => r.status === 'failed' ? '<span class="bad">失败：' + esc(r.err).slice(0, 60) + '</span>' : '', ''],
+  ];
+  $('#diff-table').innerHTML = table(cols, diffRows.slice(0, 500), '没有差异，库与磁盘一致') +
+    (diffRows.length >= 500 ? '<div class="hint">明细只显示前 500 条；批量操作用上面的按钮。</div>' : '');
+}
+function selected() { return [...document.querySelectorAll('.dsel:checked')].map(i => i.value); }
+async function reload(body) {
+  try {
+    const r = await api('/api/admin/reload?lang=' + q(), {method: 'POST', body: JSON.stringify(body)});
+    say('已提交重载任务：目标 ' + r.target + ' 个文件');
+    pollJob();
+  } catch (e) { say('重载失败：' + e.message, 'bad'); }
+}
+$('#btn-diff').onclick = doDiff;
+$('#diff-state').onchange = doDiff;
+$('#btn-reload-sel').onclick = () => {
+  const paths = selected();
+  if (!paths.length) return say('没有勾选文件', 'warn');
+  reload({paths, overwriteEdited: $('#force-edited').checked});
+};
+$('#btn-reload-changed').onclick = () => reload({selector: 'new+changed', overwriteEdited: $('#force-edited').checked});
+$('#btn-reload-all').onclick = function () {
+  twoStep(this, '再点一次：全库重扫', () => reload({all: true, overwriteEdited: $('#force-edited').checked}));
+};
+$('#btn-prune').onclick = function () {
+  twoStep(this, '再点一次：清理已删除', () => {
+    api('/api/admin/prune?lang=' + q(), {method: 'POST', body: JSON.stringify({overwriteEdited: $('#force-edited').checked})})
+      .then(r => { say('已提交清理任务：目标 ' + r.target + ' 个文件'); pollJob(); })
+      .catch(e => say('清理失败：' + e.message, 'bad'));
+  });
+};
+
+/* ---------- 文件记录 ---------- */
+async function doFiles() {
+  const p = new URLSearchParams({lang: langSel.value, q: $('#f-q').value.trim(), status: $('#f-status').value,
+    limit: filesPage.limit, offset: filesPage.offset});
+  try {
+    const d = await api('/api/admin/files?' + p);
+    const cols = [
+      ['路径', '', r => esc(r.path), 'path'],
+      ['侧', '', r => r.path.startsWith('String.wz/') ? '名称' : '属性', ''],
+      ['大小', '', r => fmtSize(r.size), 'num'],
+      ['修改时间', '', r => esc(fmtTime(r.mtime)), ''],
+      ['条目 / 溯源', '', r => r.rows + ' / ' + r.ids, 'num'],
+      ['修复', '', r => r.repaired || '', 'num'],
+      ['状态', '', r => r.status === 'failed' ? '<span class="bad">失败</span>' : '<span class="ok">ok</span>', ''],
+      ['操作', '', r => `<button class="mini" data-re="${esc(r.path)}">强制重载</button>`, ''],
+    ];
+    $('#files-table').innerHTML = table(cols, d.files, '没有匹配的文件记录') +
+      `<div class="pager">共 ${d.total} 条
+        <button class="mini" id="f-prev" ${filesPage.offset ? '' : 'disabled'}>上一页</button>
+        <button class="mini" id="f-next" ${filesPage.offset + filesPage.limit >= d.total ? 'disabled' : ''}>下一页</button></div>`;
+    $('#files-table').querySelectorAll('[data-re]').forEach(b => b.onclick = () => reload({paths: [b.dataset.re], overwriteEdited: $('#force-edited').checked}));
+    $('#f-prev').onclick = () => { filesPage.offset = Math.max(0, filesPage.offset - filesPage.limit); doFiles(); };
+    $('#f-next').onclick = () => { filesPage.offset += filesPage.limit; doFiles(); };
+    if (d.provenance === false) $('#files-table').insertAdjacentHTML('beforeend',
+      '<div class="hint warn">该语言域尚无文件级溯源，逐文件重载只能覆盖解析到的字段。</div>');
+    say(d.total ? `文件记录共 ${d.total} 条，本页 ${d.files.length} 条` : '没有匹配的文件记录');
+  } catch (e) { say('查询失败：' + e.message, 'bad'); }
+}
+$('#btn-files').onclick = () => { filesPage.offset = 0; doFiles(); };
+$('#f-q').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); filesPage.offset = 0; doFiles(); } };
+
+/* ---------- 物品修正 ---------- */
+async function doItems() {
+  const kind = curKind();
+  const p = new URLSearchParams({lang: langSel.value, kind: kind, limit: 50});
+  const kw = $('#i-q').value.trim();
+  if (/^\d+$/.test(kw)) p.set('id', kind === 'item' ? kw.padStart(8, '0') : kw); else if (kw) p.set('q', kw);
+  if ($('#i-cat').value.trim()) p.set('cat', $('#i-cat').value.trim());
+  try {
+    const d = await read('/api/items?' + p);
+    itemRows = d.items;
+    $('#items-hint').textContent = `命中 ${d.total} 条，显示前 ${d.items.length} 条`;
+    const cols = [
+      ['ID', '', r => esc(r.id), 'path'],
+      ['名称', '', r => r.name ? esc(r.name) : '<span class="bad">无</span>', ''],
+      ['分类', '', r => esc(r.category || ''), ''],
+      ['属性', '', r => Object.keys(r.info || {}).length, 'num'],
+      ['标记', '', r => (r.edited ? '<span class="warn">手工</span>' : '') + (r.icon ? ' <span class="hint">有图标</span>' : ''), ''],
+      ['更新', '', r => esc(fmtTime(r.updatedAt)), ''],
+      ['操作', '', r => `<button class="mini" data-edit="${esc(r.id)}">编辑</button>`, ''],
+    ];
+    $('#items-table').innerHTML = table(cols, itemRows, '没有匹配的' + kindName(kind)) ;
+    $('#items-table').querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openEditor(b.dataset.edit));
+  } catch (e) { say('查询失败：' + e.message, 'bad'); }
+}
+async function openEditor(id) {
+  const kind = curKind();
+  try {
+    const it = await read(`/api/item?lang=${q()}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}`);
+    cur = it;
+    $('#editor').hidden = false;
+    $('#ed-title').textContent = `编辑${kindName(it.kind || kind)} ${it.id}　${it.name || '（无名称）'}`;
+    $('#ed-name').value = it.name || '';
+    $('#ed-cat').value = it.category || '';
+    $('#ed-descr').value = it.descr || '';
+    $('#ed-info').value = JSON.stringify(it.info || {}, null, 1);
+    $('#ed-upd').value = fmtTime(it.updatedAt);
+    $('#ed-edited').checked = !!it.edited;
+    $('#ed-hint').textContent = '';
+    $('#editor').scrollIntoView({behavior: 'smooth', block: 'center'});
+  } catch (e) { say('读取失败：' + e.message, 'bad'); }
+}
+$('#btn-items').onclick = doItems;
+$('#i-q').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); doItems(); } };
+// 换实体域先关掉旧编辑面板（跨域 id 会撞车），已查过再刷新列表。
+$('#kind').onchange = () => { $('#editor').hidden = true; cur = null; if ($('#items-table').innerHTML) doItems(); };
+$('#btn-save').onclick = async () => {
+  if (!cur) return;
+  let info;
+  try { info = JSON.parse($('#ed-info').value || '{}'); } catch (e) { $('#ed-hint').textContent = 'info 不是合法 JSON：' + e.message; return; }
+  if (info === null || typeof info !== 'object' || Array.isArray(info)) { $('#ed-hint').textContent = 'info 必须是对象'; return; }
+  for (const [k, v] of Object.entries(info)) if (typeof v !== 'string') info[k] = String(v);
+  try {
+    const out = await api('/api/admin/item?lang=' + q() + '&kind=' + encodeURIComponent(curKind()), {method: 'POST', body: JSON.stringify({
+      id: cur.id, name: $('#ed-name').value, descr: $('#ed-descr').value, category: $('#ed-cat').value,
+      info, edited: $('#ed-edited').checked})});
+    cur = out;
+    $('#ed-upd').value = fmtTime(out.updatedAt);
+    $('#ed-hint').textContent = '已保存 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
+    doItems();
+  } catch (e) { $('#ed-hint').textContent = '保存失败：' + e.message; }
+};
+$('#btn-del').onclick = function () {
+  if (!cur) return;
+  const gone = cur.id, kind = curKind();
+  twoStep(this, '再点一次：删除 ' + gone, async () => {
+    try {
+      await api(`/api/admin/item?lang=${q()}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(gone)}`, {method: 'DELETE'});
+      $('#editor').hidden = true; cur = null; say('已删除 ' + gone, 'ok'); doItems();
+    } catch (e) { say('删除失败：' + e.message, 'bad'); }
+  });
+};
+$('#btn-reparse').onclick = async function () {
+  if (!cur) return;
+  const btn = this;
+  if (btn.dataset.armed === '1') {
+    const paths = (btn.dataset.paths || '').split('\n').filter(Boolean);
+    btn.dataset.armed = ''; btn.textContent = btn.dataset.orig;
+    reload({paths, overwriteEdited: $('#force-edited').checked});
+    $('#ed-hint').textContent = '已提交重载任务，进度见页面底部。';
+    return;
+  }
+  let paths = [];
+  try {
+    const d = await api(`/api/admin/sources?lang=${q()}&kind=${encodeURIComponent(curKind())}&id=${encodeURIComponent(cur.id)}`);
+    paths = d.paths || [];
+  } catch (e) { $('#ed-hint').textContent = '来源反查失败：' + e.message; return; }
+  if (!paths.length) {
+    $('#ed-hint').textContent = '没有文件登记为该行来源（旧库缺溯源，或该行是手工建的）。请先在「比对与重载」里重扫一次。';
+    return;
+  }
+  // 第一段：列清楚要重解析哪些文件并置为待确认；第二段再真正提交，避免用原生 confirm 卡住自动化。
+  btn.dataset.orig = btn.textContent; btn.dataset.armed = '1'; btn.dataset.paths = paths.join('\n');
+  btn.textContent = '再点一次：确认重解析';
+  $('#ed-hint').textContent = '将按文件为准覆盖：' + paths.join('、');
+  setTimeout(() => { if (btn.dataset.armed === '1') { btn.dataset.armed = ''; btn.textContent = btn.dataset.orig; } }, 8000);
+};
+
+/* ---------- 扫描历史 ---------- */
+async function doRuns() {
+  try {
+    const d = await api('/api/admin/runs?lang=' + q() + '&limit=50');
+    const rows = d.runs || [];
+    const cols = [
+      ['开始', '', r => esc(fmtTime(r.startedAt)), ''],
+      ['结束', '', r => esc(fmtTime(r.finishedAt) || '—'), ''],
+      ['待处理', '', r => r.total, 'num'],
+      ['成功', '', r => r.parsed, 'num'],
+      ['失败', '', r => r.failed ? `<span class="bad">${r.failed}</span>` : '0', 'num'],
+      ['备注', '', r => esc(r.note || ''), ''],
+    ];
+    $('#runs-table').innerHTML = table(cols, rows, '还没有扫描记录');
+  } catch (e) { say('查询失败：' + e.message, 'bad'); }
+}
+$('#btn-runs').onclick = doRuns;
+
+/* ---------- 任务进度 ---------- */
+async function pollJob(once) {
+  clearTimeout(jobTimer);
+  try {
+    const d = await api('/api/admin/job');
+    const j = d.job;
+    $('#job').hidden = !j;
+    if (j) {
+      const pct = j.target ? Math.min(100, Math.round((j.done / j.target) * 100)) : (j.state === 'done' ? 100 : 0);
+      $('#job-bar').style.width = pct + '%';
+      $('#job-text').textContent = `${j.kind === 'reload' ? '重载' : '清理'} · ${j.lang} · ${j.state} · ${j.done}/${j.target || '?'} 个文件` +
+        (j.note ? ' · ' + j.note : '');
+      const s = j.summary || {};
+      $('#job-log').textContent = [
+        j.err ? '错误：' + j.err : '',
+        s.parsed != null ? `解析成功 ${s.parsed}，失败 ${s.failed}，用时 ${(s.durationMs/1000).toFixed(1)}s` : '',
+        s.names != null ? `写入名称 ${s.names} 条、属性 ${s.infos} 条` : '',
+        j.kind === 'prune' && s.deletedFiles != null ? `删除文件记录 ${s.deletedFiles} 条` : '',
+        (s.cleared || s.protected) ? `清掉失效贡献 ${s.cleared} 条，跳过手工修改 ${s.protected} 条` : '',
+        (j.missing || []).length ? '清单中未匹配到文件：' + j.missing.join(', ') : '',
+      ].filter(Boolean).join('\n');
+      if (j.state === 'done') { say('任务完成', 'ok'); doDiff(); }
+      else if (j.state === 'error') say('任务失败：' + j.err, 'bad');
+    }
+    if (!once && d.running) jobTimer = setTimeout(() => pollJob(), 1200);
+  } catch (e) { if (!once) say('任务查询失败：' + e.message, 'bad'); }
+}
+
+/* ---------- 标签页 ---------- */
+$('#tabs').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  [...document.querySelectorAll('#tabs button')].forEach(x => x.classList.toggle('on', x === b));
+  ['diff', 'files', 'items', 'runs'].forEach(t => $('#p-' + t).hidden = t !== b.dataset.t);
+  if (b.dataset.t === 'files' && !$('#files-table').innerHTML) doFiles();
+  if (b.dataset.t === 'runs') doRuns();
+  if (b.dataset.t === 'items' && !$('#items-table').innerHTML) doItems();
+};
+
+boot().catch(e => say('初始化失败：' + e.message + '（若提示鉴权，请在右上角填管理口令）', 'bad'));
+</script>
+</body>
+</html>

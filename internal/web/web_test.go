@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sqx6781268/MapleWzMeta/internal/config"
 	"github.com/sqx6781268/MapleWzMeta/internal/icons"
@@ -305,7 +306,7 @@ func TestItemDetailAnd404(t *testing.T) {
 func TestStatsAndIndex(t *testing.T) {
 	srv := newTestServer(t)
 	_, data := get(t, srv.URL+"/api/stats")
-	for _, k := range []string{"items", "named", "withInfo", "complete", "files", "iconsOn"} {
+	for _, k := range []string{"items", "named", "withInfo", "complete", "files", "iconsOn", "adminOn"} {
 		if _, ok := data[k]; !ok {
 			t.Errorf("stats 缺字段 %s: %v", k, data)
 		}
@@ -315,6 +316,10 @@ func TestStatsAndIndex(t *testing.T) {
 	}
 	if data["iconsOn"] != true {
 		t.Errorf("iconsOn 错: %v", data["iconsOn"])
+	}
+	// 首页的管理入口靠 adminOn 决定是否显示，未配置时按开处理。
+	if data["adminOn"] != true {
+		t.Errorf("adminOn 错: %v", data["adminOn"])
 	}
 
 	resp, err := http.Get(srv.URL + "/")
@@ -375,6 +380,8 @@ func TestIconsDisabled(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.Locales = []config.Locale{{Lang: testLang, Label: "简体中文", Wz: tmp}}
+	off := false
+	cfg.Admin = config.Admin{Enabled: &off}
 	srv := httptest.NewServer(New(db, cfg, nil).Handler())
 	defer srv.Close()
 
@@ -387,7 +394,180 @@ func TestIconsDisabled(t *testing.T) {
 	if stats["iconsOn"] != false {
 		t.Errorf("iconsOn 应为 false: %v", stats)
 	}
+	if stats["adminOn"] != false {
+		t.Errorf("admin.enabled=false 时 adminOn 应为 false: %v", stats)
+	}
 	if r2, _ := get(t, srv.URL+"/img/2000000.png"); r2.StatusCode != http.StatusNotFound {
 		t.Errorf("未注册 /img 时应 404，实际 %d", r2.StatusCode)
+	}
+}
+
+// kind 参数贯通检索 / 详情 / 统计 / 图标域：同一个 8 位 ID 在三个域各自成行，
+// 物品行绝不挂 NPC 立绘（实测那会串味 1,578 行）。
+func TestKindParamAndIconDomain(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := store.Open(filepath.Join(tmp, "kind.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if _, err := db.PutNames(testLang, []store.NameArg{
+		{Kind: store.KindItem, ID: "01000000", Name: "布帽", Category: "Cap"},
+		{Kind: store.KindMob, ID: "01110100", Name: "绿蘑菇"},
+		{Kind: store.KindNPC, ID: "01110100", Name: "明珠港出租车"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PutInfos(testLang, []store.InfoArg{
+		{Kind: store.KindMob, ID: "01110100", Info: map[string]string{"level": "1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	imgDir := filepath.Join(tmp, "imgdata")
+	for _, rel := range []string{"Character/Cap/01000000.img.png", "Npc/1110100.img.png"} {
+		p := filepath.Join(imgDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("png"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix, err := icons.Build(imgDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Locales = []config.Locale{{Lang: testLang, Label: "简体中文", Wz: tmp}}
+	srv := httptest.NewServer(New(db, cfg, ix).Handler())
+	t.Cleanup(srv.Close)
+
+	if r, _ := get(t, srv.URL+"/api/items?kind=bogus"); r.StatusCode != http.StatusBadRequest {
+		t.Errorf("陌生 kind 应 400，实际 %d", r.StatusCode)
+	}
+
+	// 物品域：只有布帽，且拿到装备图；同 ID 的怪物/NPC 行不参与。
+	_, items := get(t, srv.URL+"/api/items")
+	if int(items["total"].(float64)) != 1 {
+		t.Fatalf("物品域应 1 条: %v", items)
+	}
+	row0 := items["items"].([]any)[0].(map[string]any)
+	if row0["icon"] != "/img/01000000.png" {
+		t.Errorf("物品图标路径错: %v", row0["icon"])
+	}
+	if r, _ := get(t, srv.URL+"/api/item?id=01110100"); r.StatusCode != http.StatusNotFound {
+		t.Errorf("物品域不该有 01110100，实际 %d", r.StatusCode)
+	}
+
+	cases := []struct {
+		kind, wantName string
+		wantIcon       any
+	}{
+		{string(store.KindMob), "绿蘑菇", nil},
+		{string(store.KindNPC), "明珠港出租车", "/img/01110100.png?for=npc"},
+	}
+	for _, c := range cases {
+		_, list := get(t, srv.URL+"/api/items?kind="+c.kind)
+		rows := list["items"].([]any)
+		if len(rows) != 1 {
+			t.Fatalf("%s 域应 1 条，实际 %v", c.kind, list)
+		}
+		r0 := rows[0].(map[string]any)
+		if r0["name"] != c.wantName {
+			t.Errorf("%s 域名称错: %v", c.kind, r0["name"])
+		}
+		if r0["icon"] != c.wantIcon {
+			t.Errorf("%s 域图标错: 期望 %v 实际 %v", c.kind, c.wantIcon, r0["icon"])
+		}
+		_, st := get(t, srv.URL+"/api/stats?kind="+c.kind)
+		if st["kind"] != c.kind || int(st["items"].(float64)) != 1 {
+			t.Errorf("%s 域概况错: %v", c.kind, st)
+		}
+		// 详情按 7 位原始号也能取到（补零归一在存储层做）。
+		resp, err := http.Get(srv.URL + "/api/item?kind=" + c.kind + "&id=1110100")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s 域 7 位 ID 详情应 200，实际 %d", c.kind, resp.StatusCode)
+		}
+	}
+
+	// 只存在于 Npc 域的图：缺省（物品）404，?for=npc 才 200。
+	for _, c := range []struct {
+		url  string
+		want int
+	}{
+		{"/img/01110100.png", http.StatusNotFound},
+		{"/img/01110100.png?for=npc", http.StatusOK},
+		{"/img/01000000.png?for=npc", http.StatusNotFound},
+	} {
+		resp, err := http.Get(srv.URL + c.url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s 应 %d，实际 %d", c.url, c.want, resp.StatusCode)
+		}
+	}
+}
+
+// 详情接口要额外给出名称侧与属性侧的来源文件；列表接口不带（反查要扫全表 JSON）。
+func TestDetailCarriesSourceFiles(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := store.Open(filepath.Join(tmp, "src.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if _, err := db.PutNames(testLang, []store.NameArg{
+		{Kind: store.KindItem, ID: "01000001", Name: "黑福巾", Category: "Cap"},
+		{Kind: store.KindMob, ID: "01000001", Name: "蜗牛"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PutInfos(testLang, []store.InfoArg{
+		{Kind: store.KindItem, ID: "01000001", Category: "Cap", Info: map[string]string{"islot": "Cp"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	if err := db.SaveFiles(testLang, []store.FileRec{
+		{Path: "String.wz/Eqp.img.xml", Size: 1, ModTime: now, Status: "ok", Kind: store.KindItem, IDs: []string{"01000001"}},
+		{Path: "Character.wz/Cap/01000001.img.xml", Size: 1, ModTime: now, Status: "ok", Kind: store.KindItem, IDs: []string{"01000001"}},
+		{Path: "String.wz/Mob.img.xml", Size: 1, ModTime: now, Status: "ok", Kind: store.KindMob, IDs: []string{"01000001"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Locales = []config.Locale{{Lang: testLang, Label: "简体中文", Wz: tmp}}
+	srv := httptest.NewServer(New(db, cfg, nil).Handler())
+	t.Cleanup(srv.Close)
+
+	_, it := get(t, srv.URL+"/api/item?lang="+testLang+"&id=1000001")
+	sf, _ := it["stringFiles"].([]any)
+	ifz, _ := it["infoFiles"].([]any)
+	if len(sf) != 1 || sf[0] != "String.wz/Eqp.img.xml" {
+		t.Errorf("详情缺名称侧来源: %v", it["stringFiles"])
+	}
+	if len(ifz) != 1 || ifz[0] != "Character.wz/Cap/01000001.img.xml" {
+		t.Errorf("详情缺属性侧来源: %v", it["infoFiles"])
+	}
+	// 怪物侧只有名称文件，属性侧应为空——跨域不得互认来源。
+	_, mob := get(t, srv.URL+"/api/item?kind=mob&lang="+testLang+"&id=01000001")
+	if m, _ := mob["infoFiles"].([]any); len(m) != 0 {
+		t.Errorf("怪物域不该有物品侧来源: %v", mob["infoFiles"])
+	}
+	// 列表接口不带溯源，避免每行都做一次全表 JSON 展开。
+	_, list := get(t, srv.URL+"/api/items?lang="+testLang)
+	row0 := list["items"].([]any)[0].(map[string]any)
+	if _, ok := row0["stringFiles"]; ok {
+		t.Errorf("列表行不该带 stringFiles: %v", row0)
 	}
 }

@@ -4,48 +4,86 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WzItemArchive · 物品元数据检索</title>
+<script>
+// 首屏先套主题，避免暗色下闪一帧白（等样式表加载完再切就晚了）。
+try { const t = localStorage.getItem('miaTheme'); if (t) document.documentElement.dataset.theme = t; } catch (_) {}
+</script>
 <style>
-  :root { --bd:#e3e6ea; --fg:#20232a; --mut:#6b7280; --acc:#2563eb; --bg:#f6f7f9; --side:288px; }
+  /* 主题：浅色口径在 :root，暗色只覆盖同名变量；切换按钮在页头右上角。
+     首屏在 <head> 里读出 localStorage 提前写 data-theme，避免暗色下闪一帧白。 */
+  :root { --side:288px;
+    --bg:#f6f7f9; --fg:#20232a; --mut:#6b7280; --bd:#e3e6ea; --acc:#2563eb;
+    --card:#fff; --th:#fafbfc; --hover:#f0f6ff; --soft:#f3f4f6; --softfg:#374151;
+    --tagbg:#eef2ff; --tagfg:#3730a3; --sel:#e5edff; --selfg:#1d4ed8; --link:#eff6ff;
+    --code:#f2f4f7; --divider:#f1f2f4; --focus:#bfdbfe; --danger:#b42318; --checker1:#f3f4f6; }
+  html[data-theme="dark"] {
+    --bg:#14161a; --fg:#e6e8ea; --mut:#9aa3ad; --bd:#2f343b; --acc:#5b9bff;
+    --card:#1b1e23; --th:#22262c; --hover:#232a35; --soft:#262b32; --softfg:#c3c9d1;
+    --tagbg:#26304a; --tagfg:#a8b8ff; --sel:#21324f; --selfg:#7fb2ff; --link:#20293a;
+    --code:#23272e; --divider:#2a2f36; --focus:#2b4a72; --danger:#ff8f85; --checker1:#2a2f36;
+  }
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; color:var(--fg); background:var(--bg); }
-  header { background:#fff; border-bottom:1px solid var(--bd); padding:12px 20px; display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  header { background:var(--card); border-bottom:1px solid var(--bd); padding:12px 20px; display:flex; align-items:center; gap:14px; flex-wrap:wrap;
            position:sticky; top:0; z-index:20; }
   header h1 { font-size:17px; margin:0; }
   header .stat { color:var(--mut); font-size:12px; flex:1 1 320px; }
+  header a.admin { font-size:13px; color:var(--acc); text-decoration:none; border:1px solid var(--bd); border-radius:6px; padding:5px 10px; }
+  header a.admin:hover { background:var(--link); border-color:var(--acc); }
+  header button.theme { font:inherit; font-size:13px; padding:5px 10px; background:var(--card); color:var(--fg); border:1px solid var(--bd); border-radius:6px; cursor:pointer; }
+  header button.theme:hover { background:var(--hover); border-color:var(--acc); }
   .layout { display:flex; align-items:flex-start; gap:16px; max-width:1440px; margin:16px auto 40px; padding:0 16px; }
   aside { width:var(--side); flex:0 0 var(--side); position:sticky; top:66px; max-height:calc(100vh - 82px); overflow:auto;
-          background:#fff; border:1px solid var(--bd); border-radius:8px; padding:12px; }
+          background:var(--card); border:1px solid var(--bd); border-radius:8px; padding:12px; }
   aside h3 { font-size:12px; color:var(--mut); margin:14px 0 6px; text-transform:none; letter-spacing:.2px; }
   aside h3:first-child { margin-top:0; }
   section.content { flex:1 1 auto; min-width:0; }
-  .card { background:#fff; border:1px solid var(--bd); border-radius:8px; padding:12px; }
+  .card { background:var(--card); border:1px solid var(--bd); border-radius:8px; padding:12px; }
   form.bar { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px; }
   label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--mut); }
-  input,select,button { font:inherit; padding:6px 9px; border:1px solid var(--bd); border-radius:6px; background:#fff; color:var(--fg); }
-  input:focus,select:focus { outline:2px solid #bfdbfe; border-color:var(--acc); }
+  input,select,button { font:inherit; padding:6px 9px; border:1px solid var(--bd); border-radius:6px; background:var(--card); color:var(--fg); }
+  input:focus,select:focus { outline:2px solid var(--focus); border-color:var(--acc); }
   #q { width:260px; }
   button { cursor:pointer; background:var(--acc); color:#fff; border-color:var(--acc); }
-  button.ghost { background:#fff; color:var(--fg); border-color:var(--bd); }
-  button.mini { padding:2px 7px; font-size:12px; background:#fff; color:var(--mut); border-color:var(--bd); }
-  table { width:100%; border-collapse:collapse; background:#fff; }
+  button.ghost { background:var(--card); color:var(--fg); border-color:var(--bd); }
+  button.mini { padding:2px 7px; font-size:12px; background:var(--card); color:var(--mut); border-color:var(--bd); }
+  table { width:100%; border-collapse:collapse; background:var(--card); table-layout:fixed; min-width:860px; }
   th,td { padding:7px 9px; border-bottom:1px solid var(--bd); text-align:left; vertical-align:middle; }
-  th { font-size:12px; color:var(--mut); font-weight:600; background:#fafbfc; position:sticky; top:0; }
-  tbody tr:hover { background:#f0f6ff; cursor:pointer; }
+  th { font-size:12px; color:var(--mut); font-weight:600; background:var(--th); position:sticky; top:0; z-index:2; }
+  tbody tr:hover { background:var(--hover); cursor:pointer; }
   td.id { font-family:Consolas,monospace; white-space:nowrap; }
   td.img { width:44px; text-align:center; }
   td.img img { width:34px; height:34px; image-rendering:pixelated; vertical-align:middle; }
-  .tag { display:inline-block; font-size:11px; padding:1px 6px; border-radius:10px; background:#eef2ff; color:#3730a3; }
-  .miss { color:#b91c1c; }
-  .pager { display:flex; gap:10px; align-items:center; justify-content:flex-end; margin-top:10px; color:var(--mut); font-size:12px; }
+  /* 关键属性：限宽后允许换行，最多 3 行，超出截断（末尾有「…另 N 项」，全量看详情）。 */
+  td.chips { overflow:hidden; }
+  .chipwrap { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+              line-height:1.9; word-break:break-all; }
+  .tag { display:inline-block; font-size:11px; padding:1px 6px; border-radius:10px; background:var(--tagbg); color:var(--tagfg); }
+  .miss { color:var(--danger); }
+  /* 表格卡片：内部滚动 + 分页钉在卡片底部，翻页不用把页面滚到底。
+     必须用 height 而不是 min-height——只给下限的话内容一撑就长高，内部滚动永远不触发。 */
+  .tablecard { display:flex; flex-direction:column; padding:0; overflow:hidden;
+               height:calc(100vh - 210px); min-height:320px; }
+  .tablewrap { flex:1 1 auto; min-height:0; overflow:auto; }
+  .pager { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:9px 12px;
+           border-top:1px solid var(--bd); background:var(--card); color:var(--mut); font-size:12px;
+           position:sticky; bottom:0; flex-wrap:wrap; }
+  .pager .nav { display:flex; gap:10px; align-items:center; margin-left:auto; }
+  /* 页码条：按钮多时整体换行，不撑破卡片宽度。 */
+  .pages { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
+  .pages button { min-width:30px; padding:3px 8px; font-size:12px; background:var(--card); color:var(--fg); border-color:var(--bd); }
+  .pages button:hover { border-color:var(--acc); color:var(--acc); }
+  .pages button.on { background:var(--acc); color:#fff; border-color:var(--acc); cursor:default; }
+  .pages .gap { padding:0 2px; color:var(--mut); }
   .empty { padding:26px; text-align:center; color:var(--mut); }
   /* 侧边栏：分类清单 */
   .catlist { max-height:290px; overflow:auto; border:1px solid var(--bd); border-radius:6px; }
-  .cat { display:flex; justify-content:space-between; gap:6px; padding:5px 8px; font-size:13px; cursor:pointer; border-bottom:1px solid #f1f2f4; }
+  .cat { display:flex; justify-content:space-between; gap:6px; padding:5px 8px; font-size:13px; cursor:pointer; border-bottom:1px solid var(--divider); }
   .cat:last-child { border-bottom:none; }
-  .cat:hover { background:#f0f6ff; }
-  .cat.on { background:#e5edff; color:#1d4ed8; font-weight:600; }
+  .cat:hover { background:var(--hover); }
+  .cat.on { background:var(--sel); color:var(--selfg); font-weight:600; }
   .cat .n { color:var(--mut); font-family:Consolas,monospace; font-size:12px; }
-  .cat.on .n { color:#1d4ed8; }
+  .cat.on .n { color:var(--selfg); }
   /* 侧边栏：条件行 */
   .cond { display:grid; grid-template-columns:1fr 62px; gap:4px; margin-bottom:6px; padding:6px; border:1px dashed var(--bd); border-radius:6px; }
   .cond .r1 { display:flex; gap:4px; }
@@ -55,44 +93,65 @@
   .cond input.val { flex:1 1 auto; min-width:0; padding:4px 6px; }
   .cond .hint { grid-column:1 / 3; font-size:11px; color:var(--mut); }
   .presets { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
-  .presets button { background:#f3f4f6; color:#374151; border-color:var(--bd); font-size:11px; padding:2px 7px; }
+  .presets button { background:var(--soft); color:var(--softfg); border-color:var(--bd); font-size:11px; padding:2px 7px; }
   /* 详情浮动层 */
   #mask { position:fixed; inset:0; background:rgba(15,23,42,.42); display:none; z-index:50; }
   #mask.on { display:block; }
   #modal { position:fixed; right:24px; top:76px; width:min(520px, calc(100vw - 48px)); max-height:calc(100vh - 110px);
-           overflow:auto; background:#fff; border:1px solid var(--bd); border-radius:10px; box-shadow:0 12px 32px rgba(0,0,0,.22);
+           overflow:auto; background:var(--card); border:1px solid var(--bd); border-radius:10px; box-shadow:0 12px 32px rgba(0,0,0,.22);
            padding:14px 16px; z-index:51; display:none; }
   #modal.on { display:block; }
-  #modal .x { position:sticky; top:0; float:right; margin:-6px -6px 0 0; background:#fff; color:var(--mut);
+  #modal .x { position:sticky; top:0; float:right; margin:-6px -6px 0 0; background:var(--card); color:var(--mut);
               border:1px solid var(--bd); border-radius:6px; width:26px; height:26px; line-height:1; padding:0; font-size:16px; }
   #modal .head { display:flex; gap:12px; align-items:flex-start; clear:none; }
   #modal .head img { width:64px; height:64px; image-rendering:pixelated; border:1px solid var(--bd); border-radius:6px; flex:0 0 64px;
-                     background:repeating-conic-gradient(#f3f4f6 0% 25%, #fff 0% 50%) 50%/12px 12px; }
+                     background:repeating-conic-gradient(var(--checker1) 0% 25%, var(--card) 0% 50%) 50%/12px 12px; }
   #modal h2 { font-size:15px; margin:0 0 6px; }
   dl.info { display:grid; grid-template-columns:1fr 1fr; gap:2px 10px; margin:10px 0 0; font-size:12px; font-family:Consolas,monospace; }
   dl.info div { display:contents; }
   dl.info dt { color:var(--mut); }
   dl.info dd { margin:0; word-break:break-all; }
-  .desc { white-space:pre-wrap; color:#374151; margin:0 0 4px; font-size:13px; }
+  .desc { white-space:pre-wrap; color:var(--softfg); margin:0 0 4px; font-size:13px; }
   details.noise { margin-top:10px; font-size:12px; color:var(--mut); }
   details.noise summary { cursor:pointer; }
+  /* 来源文件：名称侧与属性侧各自的出处，路径长所以允许换行。 */
+  .src { margin-top:12px; border-top:1px dashed var(--bd); padding-top:8px; font-size:12px; color:var(--mut);
+         display:flex; flex-direction:column; gap:4px; }
+  .src > div { display:flex; gap:6px; align-items:baseline; flex-wrap:wrap; }
+  .src > div > span { flex:0 0 4.5em; color:var(--fg); }
+  .src code { background:var(--code); border:1px solid var(--bd); border-radius:4px; padding:1px 5px; word-break:break-all; }
+  .src .none { color:var(--mut); }
   @media (max-width: 860px) { .layout { flex-direction:column; } aside { width:auto; flex:none; position:static; max-height:none; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>WzItemArchive 物品检索</h1>
+  <h1 id="brand">WzItemArchive 检索</h1>
+  <label style="font-size:12px">实体
+    <select id="kind">
+      <option value="item">物品</option>
+      <option value="npc">NPC</option>
+      <option value="mob">怪物</option>
+      <option value="skill">技能</option>
+      <option value="morph">变身</option>
+      <option value="reactor">反应堆</option>
+    </select>
+  </label>
   <label style="font-size:12px">语言
     <select id="lang"></select>
   </label>
   <div class="stat" id="stat">正在读取统计…</div>
+  <a class="admin" id="adminLink" href="/admin" hidden>管理页</a>
+  <button class="theme" id="themeBtn" title="切换白天 / 夜晚配色">夜晚</button>
 </header>
 
 <div class="layout">
   <aside>
-    <h3>分类</h3>
-    <input id="catSearch" placeholder="筛选分类…" style="width:100%;margin-bottom:6px">
-    <div class="catlist" id="catList"></div>
+    <div id="catBlock">
+      <h3>分类</h3>
+      <input id="catSearch" placeholder="筛选分类…" style="width:100%;margin-bottom:6px">
+      <div class="catlist" id="catList"></div>
+    </div>
 
     <h3>数据完整度</h3>
     <select id="complete" style="width:100%">
@@ -138,14 +197,22 @@
       </form>
     </div>
 
-    <table>
-      <thead><tr id="thead"></tr></thead>
-      <tbody id="rows"><tr><td colspan="6" class="empty">填写条件后点“查询”。</td></tr></tbody>
-    </table>
-    <div class="pager">
-      <button class="ghost" id="prev">上一页</button>
-      <span id="page">-</span>
-      <button class="ghost" id="next">下一页</button>
+    <div class="card tablecard">
+      <div class="tablewrap">
+        <table>
+          <thead><tr id="thead"></tr></thead>
+          <tbody id="rows"><tr><td colspan="6" class="empty">填写条件后点“查询”。</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <!-- 页码选择放最左边：首 2 页 + 省略号 + 当前页邻域 + 省略号 + 末 2 页 -->
+        <div class="pages" id="pages"></div>
+        <div class="nav">
+          <button class="ghost" id="prev">上一页</button>
+          <span id="page">-</span>
+          <button class="ghost" id="next">下一页</button>
+        </div>
+      </div>
     </div>
   </section>
 </div>
@@ -165,6 +232,24 @@ let catSel = '';                             // 选中分类
 
 function val(id) { return document.getElementById(id).value; }
 function lang() { return val('lang'); }
+function curKind() { return val('kind') || 'item'; }
+// 各实体域的中文名，避免在统计行/空态/详情标题里散落三元表达式。
+const KIND_LABELS = { item:'物品', npc:'NPC', mob:'怪物', skill:'技能', morph:'变身', reactor:'反应堆' };
+function kindName(kind) { return KIND_LABELS[kind] || KIND_LABELS.item; }
+
+// 白天 / 夜晚配色切换：显式写 data-theme，选择记进 localStorage（首屏脚本据此提前套用）。
+const THEME_KEY = 'miaTheme';
+function applyTheme(t) {
+  if (t) document.documentElement.dataset.theme = t;
+  const dark = document.documentElement.dataset.theme === 'dark';
+  document.getElementById('themeBtn').textContent = dark ? '白天' : '夜晚';
+}
+document.getElementById('themeBtn').onclick = () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+  applyTheme(next);
+};
+applyTheme(document.documentElement.dataset.theme || '');
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 // WZ 里的描述常把换行写成字面量反斜杠+n，展示前还原成真换行（.desc 已设 white-space:pre-wrap）。
 function nl(s) { return String(s).replace(/\\r\\n|\\n|\\r/g, '\n'); }
@@ -172,9 +257,11 @@ const attrMap = () => Object.fromEntries(meta.attrs.map(a => [a.key, a]));
 
 function collectParams() {
   const p = new URLSearchParams();
+  const kind = curKind();
+  p.set('kind', kind);
   const q = val('q').trim();
   if (q) p.set('q', q);
-  if (catSel) p.set('cat', catSel);
+  if (catSel && kind === 'item') p.set('cat', catSel);
   if (val('complete')) p.set('complete', val('complete'));
   for (const c of conds) {
     const k = (c.key || '').trim();
@@ -205,26 +292,51 @@ async function run() {
 
 function head() {
   return '<th style="width:96px">ID</th>' + (iconsOn ? '<th style="width:44px"></th>' : '') +
-         '<th style="width:180px">名称</th><th style="width:120px">分类</th><th>关键属性</th><th style="width:64px">状态</th>';
+         '<th style="width:170px">名称</th><th style="width:110px">分类</th><th>关键属性</th><th style="width:64px">状态</th>';
 }
 
 function render(items, n) {
   document.getElementById('thead').innerHTML = head();
   const tb = document.getElementById('rows');
   if (!items.length) {
-    tb.innerHTML = `<tr><td colspan="${iconsOn ? 6 : 5}" class="empty">没有命中，共 ${n} 条。</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="${iconsOn ? 6 : 5}" class="empty">没有命中的${kindName(curKind())}，共 ${n} 条。</td></tr>`;
   } else {
     tb.innerHTML = items.map(it => `<tr data-id="${it.id}">
       <td class="id">${it.id}</td>
       ${iconsOn ? `<td class="img">${it.icon ? `<img src="${it.icon}" loading="lazy" alt="">` : ''}</td>` : ''}
       <td>${it.name ? esc(it.name) : '<span class="miss">（缺名称）</span>'}</td>
       <td>${it.category ? `<span class="tag" title="${esc(it.category)}">${esc(catText(it.category))}</span>` : '-'}</td>
-      <td class="id">${chips(it.info)}</td>
+      <td class="chips"><div class="chipwrap">${chips(it.info)}</div></td>
       <td>${it.hasName && it.hasInfo ? '完整' : (it.hasName ? '仅名称' : '仅属性')}</td>
     </tr>`).join('');
   }
   document.getElementById('page').textContent =
     n ? `第 ${offset + 1} - ${Math.min(offset + items.length, n)} 条 / 共 ${n} 条` : '共 0 条';
+  renderPages(n);
+}
+
+// 页码序列：1 … 当前页前 5 页 当前页 当前页后 5 页 … 最后页，中间空档用 0 占位（渲染成 …）。
+// 两端只留首页与末页各一个按钮，是为了让"跳到开头/结尾"一键可达，又不把中间窗口挤掉。
+const PAGE_WINDOW = 5;
+
+function pageList(cur, pages) {
+  const want = new Set([1, pages]);
+  for (let d = -PAGE_WINDOW; d <= PAGE_WINDOW; d++) want.add(cur + d);
+  const nums = [...want].filter(x => x >= 1 && x <= pages).sort((x, y) => x - y);
+  const out = [];
+  nums.forEach((x, i) => { if (i && x - nums[i - 1] > 1) out.push(0); out.push(x); });
+  return out;
+}
+
+function renderPages(n) {
+  const el = document.getElementById('pages');
+  const size = (+val('limit')) || 50;
+  const pages = Math.ceil(n / size);
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  const cur = Math.floor(offset / size) + 1;
+  el.innerHTML = pageList(cur, pages).map(x => x
+    ? `<button type="button" data-p="${x}"${x === cur ? ' class="on"' : ''}>${x}</button>`
+    : '<span class="gap">…</span>').join('');
 }
 
 function catText(name) {
@@ -241,8 +353,8 @@ function chips(info) {
   const ks = Object.keys(info).filter(k => m[k] && m[k].preset);
   const rest = Object.keys(info).filter(k => !(m[k] && m[k].preset));
   let s = ks.map(k => `<span class="tag" title="${esc(k)}">${esc(attrText(k))}=${esc(info[k])}</span>`).join(' ');
-  if (rest.length) s += ` <span style="color:#6b7280">…另 ${rest.length} 项</span>`;
-  return s || '<span style="color:#6b7280">无 info</span>';
+  if (rest.length) s += ` <span style="color:var(--mut)">…另 ${rest.length} 项</span>`;
+  return s || '<span style="color:var(--mut)">无 info</span>';
 }
 
 // —— 侧边栏：分类 ——
@@ -296,7 +408,10 @@ function renderPresets() {
 }
 
 async function loadMeta() {
-  const r = await fetch('/api/meta?lang=' + encodeURIComponent(lang()));
+  const kind = curKind();
+  // NPC / 怪物是一文件一实体、没有分类目录，整块隐藏（留着只有一个"(未分类)"没意义）。
+  document.getElementById('catBlock').style.display = kind === 'item' ? '' : 'none';
+  const r = await fetch('/api/meta?lang=' + encodeURIComponent(lang()) + '&kind=' + encodeURIComponent(kind));
   if (!r.ok) { alert(await r.text()); return; }
   meta = await r.json();
   renderCats();
@@ -305,10 +420,13 @@ async function loadMeta() {
 }
 
 async function loadStats() {
-  const s = await (await fetch('/api/stats?lang=' + encodeURIComponent(lang()))).json();
+  const kind = curKind();
+  const s = await (await fetch('/api/stats?lang=' + encodeURIComponent(lang()) + '&kind=' + encodeURIComponent(kind))).json();
   iconsOn = !!s.iconsOn;
+  // 管理入口只在 admin.enabled 时出现：关掉后台时 /admin 是 404，留个死链不如不显示。
+  document.getElementById('adminLink').hidden = !s.adminOn;
   document.getElementById('stat').textContent =
-    `物品 ${s.items} 条 ｜ 有名称 ${s.named} ｜ 有属性 ${s.withInfo} ｜ 两者齐全 ${s.complete} ｜ 已扫文件 ${s.files}（失败 ${s.failed}）` +
+    `${kindName(kind)} ${s.items} 条 ｜ 有名称 ${s.named} ｜ 有属性 ${s.withInfo} ｜ 两者齐全 ${s.complete} ｜ 已扫文件 ${s.files}（失败 ${s.failed}）` +
     (s.lastRunUnix ? ` ｜ 上次扫描 ${new Date(s.lastRunUnix * 1000).toLocaleString('zh-CN')}` : '');
 }
 
@@ -317,7 +435,8 @@ async function loadStats() {
 const NOISE_KEY = /(^icon|^image|^sample|^origin|^lt\.|^rb\.|^bodyRelMove|\.origin\.|\.width$|\.height$|\.format$|\.scale$|\.x$|\.y$|\.top$|\.center$)/;
 
 async function detail(id) {
-  const r = await fetch(`/api/item?id=${encodeURIComponent(id)}&lang=${encodeURIComponent(lang())}`);
+  const kind = curKind();
+  const r = await fetch(`/api/item?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}&lang=${encodeURIComponent(lang())}`);
   const body = document.getElementById('modalBody');
   openModal();
   if (!r.ok) { body.innerHTML = `<div class="desc">${esc(await r.text())}</div>`; return; }
@@ -330,6 +449,15 @@ async function detail(id) {
   const extra = noise.length
     ? `<details class="noise"><summary>图标与坐标等内部字段（${noise.length}）</summary><dl class="info">${noise.map(dt).join('')}</dl></details>`
     : '';
+  // 一条数据是"名称侧 + 属性侧"两个文件拼出来的，详情里必须能看出各自出处，
+  // 否则改完 XML 不知道该重载哪个文件。
+  const srcList = (arr) => (arr && arr.length)
+    ? arr.map(f => `<code>${esc(f)}</code>`).join('、')
+    : '<span class="none">无（该侧没有文件认领）</span>';
+  const src = `<div class="src">
+      <div><span>名称来自</span>${srcList(it.stringFiles)}</div>
+      <div><span>属性来自</span>${srcList(it.infoFiles)}</div>
+    </div>`;
   body.innerHTML = `<div class="head">
       ${it.icon ? `<img src="${it.icon}" alt="">` : ''}
       <div style="flex:1;min-width:0">
@@ -342,7 +470,7 @@ async function detail(id) {
         <div class="stat">更新 ${esc(it.updatedAt)} ｜ 名称${it.hasName ? '有' : '缺'} ｜ 属性${it.hasInfo ? '有' : '缺'}</div>
       </div>
     </div>
-    <dl class="info">${rows || '<div><dt>-</dt><dd>该物品没有 info 节点</dd></div>'}</dl>${extra}`;
+    <dl class="info">${rows || `<div><dt>-</dt><dd>该${kindName(kind)}没有 info 节点</dd></div>`}</dl>${extra}${src}`;
 }
 function openModal() {
   document.getElementById('mask').classList.add('on');
@@ -371,6 +499,8 @@ document.getElementById('reset').addEventListener('click', () => {
   offset = 0; renderCats(); renderConds(); run();
 });
 document.getElementById('lang').addEventListener('change', refreshAll);
+// 切域时清掉分类选中：NPC/怪物没有分类目录，沿用旧的 cat 会把条件带进不存在的域。
+document.getElementById('kind').addEventListener('change', () => { catSel = ''; loadLangs(); refreshAll(); });
 document.getElementById('catSearch').addEventListener('input', renderCats);
 document.getElementById('catList').addEventListener('click', e => {
   const el = e.target.closest('.cat');
@@ -416,14 +546,29 @@ document.getElementById('rows').addEventListener('click', e => {
 document.getElementById('closeModal').addEventListener('click', closeModal);
 document.getElementById('mask').addEventListener('click', closeModal);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+document.getElementById('pages').addEventListener('click', e => {
+  const b = e.target.closest('button[data-p]');
+  if (!b) return;
+  const size = (+val('limit')) || 50;
+  // 夹一道上限：改每页条数后旧页码可能已超出总页数。
+  offset = (Math.min(+b.dataset.p, Math.max(1, Math.ceil(total / size))) - 1) * size;
+  run();
+});
 document.getElementById('prev').addEventListener('click', () => { offset = Math.max(0, offset - (+val('limit'))); run(); });
 document.getElementById('next').addEventListener('click', () => { if (offset + (+val('limit')) < total) { offset += +val('limit'); run(); } });
 
-(async () => {
-  const data = await (await fetch('/api/langs')).json();
+// 语言下拉里的条数取自 /api/langs，必须带当前实体域：物品 5.6 万、怪物 2.5 千，
+// 用物品域的计数标在怪物页上会误导。切换时保留用户已选语言，只有它在新域里不存在才回落默认值。
+async function loadLangs() {
   const sel = document.getElementById('lang');
+  const keep = sel.value;
+  const data = await (await fetch('/api/langs?kind=' + encodeURIComponent(curKind()))).json();
   sel.innerHTML = data.langs.map(l => `<option value="${esc(l.lang)}">${esc(l.label)} (${l.items})</option>`).join('');
-  sel.value = data.default;
+  sel.value = keep && data.langs.some(l => l.lang === keep) ? keep : data.default;
+}
+
+(async () => {
+  await loadLangs();
   await refreshAll();
 })();
 </script>

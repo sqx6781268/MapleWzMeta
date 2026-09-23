@@ -81,6 +81,8 @@ func runScan(args []string) error {
 	langs := fs.String("lang", "all", "只扫描这些语言，逗号分隔；all 表示配置里的全部")
 	limit := fs.Int("limit", 0, "每个语言最多解析多少个待处理文件，0 表示不限（调试用）")
 	batch := fs.Int("batch", 400, "每攒多少文件写一次库")
+	force := fs.Bool("force", false, "忽略 size+mtime 增量判定，全部重解析")
+	overwrite := fs.Bool("overwrite", false, "按文件为准覆盖：名称直接覆盖、info 整包替换，并清掉解析不到的历史贡献")
 	dbPath := fs.String("db", "", "覆盖配置里的 SQLite 路径")
 	_ = fs.Parse(args)
 
@@ -103,6 +105,7 @@ func runScan(args []string) error {
 		res, err := scan.Run(scan.Options{
 			Lang: l.Lang, Root: l.Wz, Sources: l.Sources,
 			Workers: cfg.Workers, Limit: *limit, Batch: *batch,
+			Force: *force, Overwrite: *overwrite, SkipEdited: true,
 		}, db)
 		if err != nil {
 			return fmt.Errorf("%s: %w", l.Lang, err)
@@ -111,6 +114,9 @@ func runScan(args []string) error {
 		fmt.Printf("磁盘文件 %d，跳过未变 %d，解析成功 %d，失败 %d\n", res.Found, res.Skipped, res.Parsed, res.Failed)
 		fmt.Printf("写入名称条目 %d，属性条目 %d；uol 展开 %d，容错修复 %d 处\n",
 			res.Names, res.Infos, res.UolFixed, res.Repaired)
+		if res.Cleared > 0 || res.Protected > 0 {
+			fmt.Printf("覆盖模式：清掉失效贡献 %d 条，跳过手工修改 %d 条\n", res.Cleared, res.Protected)
+		}
 		for _, e := range res.Errors {
 			fmt.Printf("  失败: %s\n", e)
 		}
@@ -125,6 +131,7 @@ func runQuery(args []string) error {
 	fs := flag.NewFlagSet("query", flag.ExitOnError)
 	configPath := fs.String("config", "", "配置文件路径，默认找 ./wzconfig.json")
 	lang := fs.String("lang", "", "语言标识，缺省用配置里的第一个 locale")
+	kind := fs.String("kind", "item", "实体域：item / npc / mob")
 	name := fs.String("q", "", "名称模糊匹配")
 	id := fs.String("id", "", "精确 ID")
 	prefix := fs.String("prefix", "", "ID 前缀")
@@ -145,6 +152,14 @@ func runQuery(args []string) error {
 	if err != nil {
 		return err
 	}
+	k, ok := store.ParseKind(*kind)
+	if !ok {
+		names := make([]string, len(store.Kinds))
+		for i, kk := range store.Kinds {
+			names[i] = string(kk)
+		}
+		return fmt.Errorf("kind 只能是 %s，收到 %q", strings.Join(names, " / "), *kind)
+	}
 	db, err := openDB(cfg, *dbPath)
 	if err != nil {
 		return err
@@ -152,6 +167,7 @@ func runQuery(args []string) error {
 	defer db.Close()
 
 	q := store.Query{
+		Kind: k,
 		Lang: l.Lang, Name: *name, ID: *id, IDPrefix: *prefix, Category: *cat,
 		Limit: *limit, OrderBy: "id",
 	}
@@ -173,9 +189,9 @@ func runQuery(args []string) error {
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetEscapeHTML(false)
-		return enc.Encode(map[string]any{"lang": l.Lang, "total": total, "items": rows})
+		return enc.Encode(map[string]any{"lang": l.Lang, "kind": string(k), "total": total, "items": rows})
 	}
-	fmt.Printf("语言 %s：命中 %d 条，显示前 %d 条\n", l.Lang, total, len(rows))
+	fmt.Printf("语言 %s / 实体 %s：命中 %d 条，显示前 %d 条\n", l.Lang, k, total, len(rows))
 	for _, it := range rows {
 		fmt.Printf("  %s  %-16s %-12s %s\n", it.ID, it.Name, it.Category, pick(it.Info))
 	}
@@ -221,33 +237,47 @@ func runStats(args []string) error {
 	return nil
 }
 
-// printStats 打印某个语言域的规模概况。
+// kindLabel 是实体域的中文显示名，与查询页顶部的切换器一致。
+var kindLabel = map[store.Kind]string{
+	store.KindItem:    "物品",
+	store.KindNPC:     "NPC",
+	store.KindMob:     "怪物",
+	store.KindSkill:   "技能",
+	store.KindMorph:   "变身",
+	store.KindReactor: "反应堆",
+}
+
+// printStats 打印某个语言域的规模概况：三个实体域各一行，文件数是语言域级别的合计。
 func printStats(db *store.DB, cfg config.Config, lang string) error {
-	st, err := db.Stats(lang)
-	if err != nil {
-		return err
-	}
-	pct := func(n int) float64 {
-		if st.Items == 0 {
-			return 0
-		}
-		return float64(n) * 100 / float64(st.Items)
-	}
 	label := lang
 	if l, ok := cfg.Locale(lang); ok && l.Label != "" {
 		label = l.Label
 	}
 	fmt.Printf("\n--- %s（%s）---\n", lang, label)
-	fmt.Printf("物品 %d 条：有名称 %d (%.2f%%)，有属性 %d (%.2f%%)，齐全 %d (%.2f%%)\n",
-		st.Items, st.Named, pct(st.Named), st.WithInfo, pct(st.WithInfo), st.Complete, pct(st.Complete))
-	fmt.Printf("已记录文件 %d 个，其中解析失败 %d 个\n", st.Files, st.Failed)
-	if len(st.Categories) > 0 {
-		var parts []string
-		for _, c := range st.Categories {
-			parts = append(parts, fmt.Sprintf("%s=%d", c.Name, c.Count))
+	var files, failed int
+	for _, kind := range store.Kinds {
+		st, err := db.Stats(kind, lang)
+		if err != nil {
+			return err
 		}
-		fmt.Printf("分类 Top%d：%s\n", len(st.Categories), strings.Join(parts, "  "))
+		files, failed = st.Files, st.Failed
+		pct := func(n int) float64 {
+			if st.Items == 0 {
+				return 0
+			}
+			return float64(n) * 100 / float64(st.Items)
+		}
+		fmt.Printf("%-4s %d 条：有名称 %d (%.2f%%)，有属性 %d (%.2f%%)，齐全 %d (%.2f%%)\n",
+			kindLabel[kind], st.Items, st.Named, pct(st.Named), st.WithInfo, pct(st.WithInfo), st.Complete, pct(st.Complete))
+		if len(st.Categories) > 0 && kind == store.KindItem {
+			var parts []string
+			for _, c := range st.Categories {
+				parts = append(parts, fmt.Sprintf("%s=%d", c.Name, c.Count))
+			}
+			fmt.Printf("     分类 Top%d：%s\n", len(st.Categories), strings.Join(parts, "  "))
+		}
 	}
+	fmt.Printf("已记录文件 %d 个，其中解析失败 %d 个\n", files, failed)
 	return nil
 }
 

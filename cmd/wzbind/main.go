@@ -91,7 +91,7 @@ func main() {
 				}
 				mu.Lock()
 				if strings.HasPrefix(rel, "String.wz") {
-					res.names = append(res.names, extract.Names(n)...)
+					res.names = append(res.names, extract.Names(rel, n)...)
 				} else {
 					res.infos = append(res.infos, extract.Infos(rel, n)...)
 				}
